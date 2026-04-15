@@ -13,7 +13,7 @@ const MAX_CONN_PROCESS = 1000;
 // ========== 日志与安全工具函数 ==========
 
 function log(msg) {
-    let t = strftime('%Y-%m-%d %H:%M:%S', time());
+    let t = strftime('%Y-%m-%d %H:%M:%S', systime());
     print(sprintf("[%s] [Traffic] %s\n", t, msg));
 }
 
@@ -77,7 +77,7 @@ function collect_traffic() {
     let last = f ? json(f.read('all')) : { u: 0, d: 0, last_persist: 0 };
     if (f) f.close();
 
-    let now = time();
+    let now = systime();
     let up_delta = (stats.uploadTotal >= (last.u || 0)) ? (stats.uploadTotal - (last.u || 0)) : stats.uploadTotal;
     let down_delta = (stats.downloadTotal >= (last.d || 0)) ? (stats.downloadTotal - (last.d || 0)) : stats.downloadTotal;
 
