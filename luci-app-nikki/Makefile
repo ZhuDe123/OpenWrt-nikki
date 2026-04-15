@@ -13,17 +13,5 @@ LUCI_LANG:=zh_Hans
 
 include $(TOPDIR)/feeds/luci/luci.mk
 
-# 确保在安装时设置正确的执行权限
-define Package/luci-app-nikki/postinst
-#!/bin/sh
-if [ -z "$${IPKG_INSTROOT}" ]; then
-	chmod +x /usr/bin/nikki-traffic.uc
-	chmod +x /etc/init.d/nikki-traffic
-	/etc/init.d/nikki-traffic enable
-	/etc/init.d/nikki-traffic start
-fi
-exit 0
-endef
-
 # call BuildPackage - OpenWrt buildroot signature
 $(eval $(call BuildPackage,$(PKG_NAME)))
