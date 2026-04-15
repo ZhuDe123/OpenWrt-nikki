@@ -27,8 +27,9 @@ start_service() {
     }
     
     procd_open_instance
-    procd_set_param command /bin/sh
-    procd_set_param args "-c 'while true; do /etc/nikki/scripts/traffic-collect.sh collect; sleep $interval; done'"
+    procd_set_param command /usr/bin/ucode
+    procd_set_param args "/etc/nikki/ucode/traffic-collector.uc"
+    procd_set_param env COLLECT_INTERVAL=$interval
     procd_set_param respawn
     procd_set_param respawn_threshold 300
     procd_set_param respawn_timeout 5
@@ -39,7 +40,7 @@ start_service() {
 
 stop_service() {
     # 关机前导出数据
-    /etc/nikki/scripts/traffic-collect.sh export
+    /usr/bin/ucode /etc/nikki/ucode/traffic.uc export
 }
 
 reload_service() {
