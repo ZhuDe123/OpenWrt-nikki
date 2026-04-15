@@ -1,5 +1,5 @@
 #!/usr/bin/ucode
-// /etc/nikki/ucode/traffic.uc - 完整流量统计脚本（高性能版）
+// /etc/nikki/ucode/traffic.uc - 完整流量统计脚本（使用 /traffic/ip API）
 // 支持：全局总量 + 各 IP 流量（活跃 + 已关闭）+ 按月统计
 
 import { open, mkdir, chmod, stat, popen } from 'fs';
@@ -84,30 +84,31 @@ function collect_traffic() {
         let up_total = traffic_data.upTotal || 0;
         let down_total = traffic_data.downTotal || 0;
         
-        // 2. 获取活跃连接的 IP 统计（限制数据量）
+        // 2. 获取活跃连接的 IP 统计（使用新的聚合 API，无需限制 50KB）
         let ip_stats = {};
-        let p2 = popen(get_api_url("/connections") + " | head -c 50000");
-        let conn_res = p2 ? p2.read('all') : '{}';
+        let p2 = popen(get_api_url("/traffic/ip"));
+        let ip_res = p2 ? p2.read('all') : '{}';
         if (p2) p2.close();
         
-        let conn_data = {};
-        if (conn_res && match(conn_res, /^\s*\{/)) {
-            conn_data = json(conn_res) || {};
+        // 解析 IP 统计数据
+        let ip_data = {};
+        if (ip_res && match(ip_res, /^\s*\{/)) {
+            ip_data = json(ip_res) || {};
         }
         
-        if (conn_data.connections) {
-            for (let conn in conn_data.connections) {
-                let ip = conn.metadata?.sourceIP || 'unknown';
+        if (ip_data.ipStats) {
+            for (let ip_stat in ip_data.ipStats) {
+                let ip = ip_stat.ip;
                 if (ip != 'unknown' && ip != 'invalid IP') {
                     if (!ip_stats[ip]) ip_stats[ip] = {up: 0, down: 0};
-                    ip_stats[ip].up += (conn.upload || 0);
-                    ip_stats[ip].down += (conn.download || 0);
+                    ip_stats[ip].up += (ip_stat.upload || 0);
+                    ip_stats[ip].down += (ip_stat.download || 0);
                 }
             }
         }
         
         // 3. 获取已关闭连接的 IP 统计
-        let p3 = popen(get_api_url("/traffic/closed") + " | head -c 50000");
+        let p3 = popen(get_api_url("/traffic/closed"));
         let closed_res = p3 ? p3.read('all') : '{}';
         if (p3) p3.close();
         
