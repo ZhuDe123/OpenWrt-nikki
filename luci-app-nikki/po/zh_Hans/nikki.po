@@ -1169,3 +1169,31 @@ msgstr "刷新"
 #: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic.js:116
 msgid "上次更新："
 msgstr "上次更新："
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:191
+msgid "Traffic Statistics"
+msgstr "流量统计"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:193
+msgid "Enable Traffic Statistics"
+msgstr "启用流量统计"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:195
+msgid "Enable traffic collection and storage"
+msgstr "启用流量收集和存储"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:198
+msgid "Collection Interval (seconds)"
+msgstr "采集间隔（秒）"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:204
+msgid "Data Retention Days"
+msgstr "数据保留天数"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:210
+msgid "Database Path"
+msgstr "数据库路径"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:213
+msgid "SQLite database file path, recommend using /tmp (RAM) to protect flash storage"
+msgstr "SQLite 数据库文件路径，推荐使用 /tmp (内存) 以保护闪存存储"
+
