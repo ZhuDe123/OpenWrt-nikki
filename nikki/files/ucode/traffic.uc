@@ -1,6 +1,7 @@
 #!/usr/bin/ucode
 // /etc/nikki/ucode/traffic.uc - Production Stable Version
 // Fixed: SQL injection, command injection, data persistence
+// Compatible with ImmortalWrt ucode (no time/systime built-in)
 
 import { open, mkdir, chmod, stat, popen } from 'fs';
 import { connect } from 'ubus';
@@ -10,10 +11,27 @@ const PERSIST_DB = '/etc/nikki/traffic.db.bak';
 const STATE_FILE = '/tmp/nikki/traffic_state.json';
 const MAX_CONN_PROCESS = 1000;
 
+// ========== 时间工具函数 (使用 shell date 命令) ==========
+
+function get_timestamp() {
+    let p = popen('date +%s');
+    let t = p ? int(trim(p.read('all'))) : 0;
+    if (p) p.close();
+    return t;
+}
+
+function format_date(fmt) {
+    let cmd = sprintf("date %s", shell_quote("+" + fmt));
+    let p = popen(cmd);
+    let t = p ? trim(p.read('all')) : '';
+    if (p) p.close();
+    return t;
+}
+
 // ========== 日志与安全工具函数 ==========
 
 function log(msg) {
-    let t = strftime('%Y-%m-%d %H:%M:%S', systime());
+    let t = format_date('%Y-%m-%d %H:%M:%S');
     print(sprintf("[%s] [Traffic] %s\n", t, msg));
 }
 
@@ -77,13 +95,13 @@ function collect_traffic() {
     let last = f ? json(f.read('all')) : { u: 0, d: 0, last_persist: 0 };
     if (f) f.close();
 
-    let now = systime();
+    let now = get_timestamp();
     let up_delta = (stats.uploadTotal >= (last.u || 0)) ? (stats.uploadTotal - (last.u || 0)) : stats.uploadTotal;
     let down_delta = (stats.downloadTotal >= (last.d || 0)) ? (stats.downloadTotal - (last.d || 0)) : stats.downloadTotal;
 
-    let today = strftime('%Y-%m-%d', now);
-    let hour_full = strftime('%Y-%m-%d %H:00', now);
-    let hour_num = int(strftime('%H', now));
+    let today = format_date('%Y-%m-%d');
+    let hour_full = format_date('%Y-%m-%d %H:00');
+    let hour_num = int(format_date('%H'));
 
     // 构建大事务 SQL (修复 P0: 使用 down_delta 而非 download_delta)
     let sql = sprintf(
