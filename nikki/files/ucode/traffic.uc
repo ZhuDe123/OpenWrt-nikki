@@ -2,7 +2,7 @@
 // /etc/nikki/ucode/traffic.uc - Production Stable Version
 // Fixed: SQL injection, command injection, data persistence
 
-import { open, mkdir, chmod, stat, popen, system } from 'fs';
+import { open, mkdir, chmod, stat, popen } from 'fs';
 import { connect } from 'ubus';
 
 const DB_PATH = '/tmp/nikki/traffic.db';
