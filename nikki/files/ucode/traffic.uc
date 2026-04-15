@@ -4,6 +4,7 @@
 
 import { open, mkdir, chmod, stat, popen } from 'fs';
 import { connect } from 'ubus';
+import { strftime, time } from 'time';
 
 const DB_PATH = '/tmp/nikki/traffic.db';
 const PERSIST_DB = '/etc/nikki/traffic.db.bak';
