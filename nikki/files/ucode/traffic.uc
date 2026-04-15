@@ -3,7 +3,6 @@
 // Fixed: SQL injection, command injection, data persistence
 
 import { open, mkdir, chmod, stat, popen } from 'fs';
-import { system } from 'os';
 import { connect } from 'ubus';
 
 const DB_PATH = '/tmp/nikki/traffic.db';
