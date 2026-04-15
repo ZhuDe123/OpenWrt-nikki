@@ -186,6 +186,28 @@ return view.extend({
         o = s.taboption('environment_variable', form.Flag, 'env_skip_system_ipv6_check', _('Skip System IPv6 Check'));
         o.rmempty = false;
 
+        // 添加流量统计配置选项卡
+        s.tab('traffic_stats', _('Traffic Statistics'));
+
+        o = s.taboption('traffic_stats', form.Flag, 'traffic_enabled', _('Enable Traffic Statistics'));
+        o.rmempty = false;
+        o.description = _('Enable traffic collection and storage');
+
+        o = s.taboption('traffic_stats', form.Value, 'traffic_collect_interval', _('Collection Interval (seconds)'));
+        o.datatype = 'uinteger';
+        o.placeholder = '30';
+        o.depends('traffic_enabled', '1');
+
+        o = s.taboption('traffic_stats', form.Value, 'traffic_retain_days', _('Data Retention Days'));
+        o.datatype = 'uinteger';
+        o.placeholder = '30';
+        o.depends('traffic_enabled', '1');
+
+        o = s.taboption('traffic_stats', form.Value, 'traffic_db_path', _('Database Path'));
+        o.placeholder = '/tmp/nikki/traffic.db';
+        o.depends('traffic_enabled', '1');
+        o.description = _('SQLite database file path, recommend using /tmp (RAM) to protect flash storage');
+
         return m.render();
     }
 });
