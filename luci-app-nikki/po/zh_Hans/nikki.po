@@ -1098,27 +1098,21 @@ msgstr "采集间隔（秒）"
 msgid "Data Retention Days"
 msgstr "数据保留天数"
 
-#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic-settings.js:9
 msgid "流量统计设置"
 msgstr "流量统计设置"
 
-#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic-settings.js:13
 msgid "基本设置"
 msgstr "基本设置"
 
-#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic-settings.js:16
 msgid "启用流量统计"
 msgstr "启用流量统计"
 
-#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic-settings.js:18
 msgid "开启后将自动采集和存储流量数据，会占用少量系统资源"
 msgstr "开启后将自动采集和存储流量数据，会占用少量系统资源"
 
-#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic-settings.js:20
 msgid "采集间隔"
 msgstr "采集间隔"
 
-#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic-settings.js:24
 msgid "数据保留天数"
 msgstr "数据保留天数"
 
