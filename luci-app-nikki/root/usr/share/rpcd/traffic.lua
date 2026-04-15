@@ -1,39 +1,34 @@
 #!/usr/bin/lua
+-- LuCI RPC API for traffic statistics
+-- Fixed: Command injection prevention, parameter validation
 
-local sys = require "luci.sys"
 local util = require "luci.util"
+local sys = require "luci.sys"
 local http = require "luci.http"
-local uci = require "luci.model.uci".cursor()
 
 module("luci.rpc.traffic", package.seeall)
 
 function traffic_stats()
+    -- 1. 参数验证 (白名单)
     local period = http.formvalue("period") or "day"
-    local date = http.formvalue("date") or os.date("%Y-%m-%d")
-    
-    -- 调用 ucode 脚本获取统计数据
-    local result = sys.exec("/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats " .. period .. " " .. date)
-    
-    if result and result ~= "" then
-        local stats = util.json_decode(result)
-        if stats then
-            -- 获取 IP 统计数据
-            local ip_result = sys.exec("/usr/bin/ucode /etc/nikki/ucode/traffic.uc ip-stats " .. date)
-            local ip_stats = util.json_decode(ip_result) or {}
-            
-            return {
-                stats = stats,
-                ip_stats = ip_stats,
-                date = date,
-                period = period
-            }
-        end
+    if period ~= "day" and period ~= "month" and period ~= "year" then
+        period = "day"
     end
     
-    return {
-        stats = {},
-        ip_stats = {},
-        date = date,
-        period = period
-    }
+    local date = http.formvalue("date") or os.date("%Y-%m-%d")
+    -- 严格的日期格式校验
+    if not date:match("^%d%d%d%d%-%d%d%-%d%d$") then
+        date = os.date("%Y-%m-%d")
+    end
+
+    -- 2. 执行安全转义后的命令
+    local cmd = string.format("/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats %s %s 2>&1", 
+        util.shellquote(period), 
+        util.shellquote(date))
+    
+    local raw_data = util.exec(cmd)
+
+    -- 3. 输出
+    http.prepare_content("application/json")
+    http.write(raw_data or "{\"error\": \"no data\"}")
 end

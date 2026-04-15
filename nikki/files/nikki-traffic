@@ -1,10 +1,13 @@
-#!/bin/sh
+#!/bin/sh /etc/init.d/nikki-traffic
 # /etc/init.d/nikki-traffic
 
-START=95
+START=99
 STOP=10
 USE_PROCD=1
-INITFILE=/etc/config/nikki
+
+ENGINE="/usr/bin/nikki-traffic.uc"
+PERSIST_DB="/etc/nikki/traffic.db.bak"
+DB_PATH="/tmp/nikki/traffic.db"
 
 validate_section() {
     uci_validate_section nikki traffic \
@@ -16,19 +19,31 @@ validate_section() {
 
 start_service() {
     local enabled interval
-    
+
     config_load nikki
     config_get enabled traffic enabled 0
     config_get interval traffic collect_interval 30
-    
+
     [ "$enabled" != "1" ] && {
-        echo "Nikki traffic统计未启用"
+        echo "Nikki traffic statistics disabled"
         return 0
     }
-    
-    procd_open_instance
-    procd_set_param command /bin/sh
-    procd_set_param args "-c 'while true; do /usr/bin/ucode /etc/nikki/ucode/traffic.uc collect; sleep $interval; done'"
+
+    # 确保目录存在
+    mkdir -p /tmp/nikki
+    chmod 0700 /tmp/nikki
+    mkdir -p /etc/nikki
+    chmod 0755 /etc/nikki
+
+    # 启动前尝试从 Flash 恢复数据
+    if [ -f "$PERSIST_DB" ] && [ ! -f "$DB_PATH" ]; then
+        echo "Restoring traffic database from backup..."
+        cp "$PERSIST_DB" "$DB_PATH"
+        chmod 0600 "$DB_PATH"
+    fi
+
+    procd_open_instance "collector"
+    procd_set_param command /bin/sh -c "while true; do $ENGINE collect; sleep $interval; done"
     procd_set_param respawn
     procd_set_param respawn_threshold 300
     procd_set_param respawn_timeout 5
@@ -38,8 +53,9 @@ start_service() {
 }
 
 stop_service() {
-    # 关机前导出数据
-    /usr/bin/ucode /etc/nikki/ucode/traffic.uc export
+    # 停止服务时执行最终备份
+    echo "Backing up traffic database..."
+    $ENGINE persist
 }
 
 reload_service() {
@@ -51,5 +67,3 @@ reload_service() {
 service_triggers() {
     procd_add_reload_trigger "nikki"
 }
-
-${RC_SUBREE:+${RC_SUBREE}}

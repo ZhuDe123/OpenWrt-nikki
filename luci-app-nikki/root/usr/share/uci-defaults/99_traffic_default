@@ -3,20 +3,24 @@
 
 # 创建流量统计配置
 uci -q batch <<-EOF > /dev/null
-    set nikki.traffic=traffic
-    set nikki.traffic.enabled='0'
-    set nikki.traffic.collect_interval='30'
-    set nikki.traffic.db_path='/tmp/nikki/traffic.db'
-    set nikki.traffic.retain_days='30'
-    commit nikki
+	set nikki.traffic=traffic
+	set nikki.traffic.enabled='0'
+	set nikki.traffic.collect_interval='30'
+	set nikki.traffic.db_path='/tmp/nikki/traffic.db'
+	set nikki.traffic.retain_days='30'
+	commit nikki
 EOF
+
+# 确保备份目录存在
+mkdir -p /etc/nikki
+chmod 0755 /etc/nikki
 
 # 启用并启动流量统计服务
 if [ "$(uci -q get nikki.traffic.enabled)" = "1" ]; then
-    /etc/init.d/nikki-traffic enable
-    /etc/init.d/nikki-traffic start
+	/etc/init.d/nikki-traffic enable
+	/etc/init.d/nikki-traffic start
 else
-    /etc/init.d/nikki-traffic disable
+	/etc/init.d/nikki-traffic disable
 fi
 
 exit 0
