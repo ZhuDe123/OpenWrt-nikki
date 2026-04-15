@@ -98,7 +98,9 @@ function collect_traffic() {
     // IP 统计 (带限流)
     if (stats.connections) {
         let ip_map = {}, count = 0;
-        for (let conn of stats.connections) {
+        // 修复：使用 for...in 替代 for...of (兼容老版本 ucode)
+        for (let conn_idx in stats.connections) {
+            let conn = stats.connections[conn_idx];
             if (++count > MAX_CONN_PROCESS) {
                 log("Warning: Too many connections, truncating at " + MAX_CONN_PROCESS);
                 break;
