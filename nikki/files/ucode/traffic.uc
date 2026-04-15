@@ -2,7 +2,7 @@
 // /etc/nikki/ucode/traffic.uc - Production Stable Version
 // Fixed: SQL injection, command injection, data persistence
 
-import { open, mkdir, chmod, stat, popen } from 'fs';
+import { open, mkdir, chmod, stat, popen, system } from 'fs';
 import { connect } from 'ubus';
 
 const DB_PATH = '/tmp/nikki/traffic.db';
@@ -12,25 +12,8 @@ const MAX_CONN_PROCESS = 1000;
 
 // ========== 日志与安全工具函数 ==========
 
-// 获取当前时间戳 (使用 shell 命令)
-function get_time() {
-    let p = popen('date +%s');
-    let t = p ? p.read('all') : '0';
-    if (p) p.close();
-    return int(trim(t));
-}
-
-// 格式化时间 (使用 shell 命令)
-function format_time(fmt) {
-    let cmd = sprintf('date +%s', fmt);
-    let p = popen(cmd);
-    let t = p ? p.read('all') : '';
-    if (p) p.close();
-    return trim(t);
-}
-
 function log(msg) {
-    let t = format_time('%Y-%m-%d %H:%M:%S');
+    let t = strftime('%Y-%m-%d %H:%M:%S', time());
     print(sprintf("[%s] [Traffic] %s\n", t, msg));
 }
 
@@ -94,13 +77,13 @@ function collect_traffic() {
     let last = f ? json(f.read('all')) : { u: 0, d: 0, last_persist: 0 };
     if (f) f.close();
 
-    let now = get_time();
+    let now = time();
     let up_delta = (stats.uploadTotal >= (last.u || 0)) ? (stats.uploadTotal - (last.u || 0)) : stats.uploadTotal;
     let down_delta = (stats.downloadTotal >= (last.d || 0)) ? (stats.downloadTotal - (last.d || 0)) : stats.downloadTotal;
 
-    let today = format_time('%Y-%m-%d');
-    let hour_full = format_time('%Y-%m-%d %H:00');
-    let hour_num = int(format_time('%H'));
+    let today = strftime('%Y-%m-%d', now);
+    let hour_full = strftime('%Y-%m-%d %H:00', now);
+    let hour_num = int(strftime('%H', now));
 
     // 构建大事务 SQL (修复 P0: 使用 down_delta 而非 download_delta)
     let sql = sprintf(
