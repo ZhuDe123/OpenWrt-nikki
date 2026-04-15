@@ -64,8 +64,8 @@ define Package/nikki/install
 	$(INSTALL_BIN) $(CURDIR)/files/ucode/include.uc $(1)/etc/nikki/ucode/include.uc
 	$(INSTALL_BIN) $(CURDIR)/files/ucode/mixin.uc $(1)/etc/nikki/ucode/mixin.uc
 	$(INSTALL_BIN) $(CURDIR)/files/ucode/hijack.ut $(1)/etc/nikki/ucode/hijack.ut
-	$(INSTALL_BIN) $(CURDIR)/files/ucode/traffic.uc $(1)/etc/nikki/ucode/traffic.uc
-	$(INSTALL_BIN) $(CURDIR)/files/ucode/traffic_collector.uc $(1)/etc/nikki/ucode/traffic_collector.uc
+	$(INSTALL_BIN) $(CURDIR)/files/ucode/traffic-api.uc $(1)/etc/nikki/ucode/traffic-api.uc
+	$(INSTALL_BIN) $(CURDIR)/files/scripts/traffic-collect.sh $(1)/etc/nikki/scripts/traffic-collect.sh
 
 	$(INSTALL_BIN) $(CURDIR)/files/scripts/include.sh $(1)/etc/nikki/scripts/include.sh
 	$(INSTALL_BIN) $(CURDIR)/files/scripts/firewall_include.sh $(1)/etc/nikki/scripts/firewall_include.sh
