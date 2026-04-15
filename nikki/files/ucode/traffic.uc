@@ -11,6 +11,16 @@ const PERSIST_DB = '/etc/nikki/traffic.db.bak';
 const STATE_FILE = '/tmp/nikki/traffic_state.json';
 const MAX_CONN_PROCESS = 1000;
 
+// ========== 日志与安全工具函数 ==========
+
+function sql_escape(str) {
+    return str ? "'" + replace(str, "'", "''") + "'" : "''";
+}
+
+function shell_quote(str) {
+    return str ? "'" + replace(str, "'", "'\\''") + "'" : "''";
+}
+
 // ========== 时间工具函数 (使用 shell date 命令) ==========
 
 function get_timestamp() {
@@ -28,19 +38,9 @@ function format_date(fmt) {
     return t;
 }
 
-// ========== 日志与安全工具函数 ==========
-
 function log(msg) {
     let t = format_date('%Y-%m-%d %H:%M:%S');
     print(sprintf("[%s] [Traffic] %s\n", t, msg));
-}
-
-function sql_escape(str) {
-    return str ? "'" + replace(str, "'", "''") + "'" : "''";
-}
-
-function shell_quote(str) {
-    return str ? "'" + replace(str, "'", "'\\''") + "'" : "''";
 }
 
 function run_sql_batch(sql_commands) {
