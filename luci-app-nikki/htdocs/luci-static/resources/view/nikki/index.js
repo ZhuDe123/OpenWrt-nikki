@@ -9,7 +9,8 @@ return view.extend({
 
 		m = new form.Map('nikki', _('Nikki'), _('A rule based proxy in Go.'));
 
-		s = m.section(form.TypedSection, 'nikki', _('Settings'));
+		// 基本设置
+		s = m.section(form.TypedSection, 'main', _('Basic Settings'));
 		s.addremove = false;
 		s.anonymous = true;
 
@@ -23,12 +24,18 @@ return view.extend({
 		o.value('info');
 		o.value('debug');
 
-		o = s.option(form.Value, 'api_host', _('API Host'));
-		o.datatype = 'host';
+		// API 设置
+		s = m.section(form.TypedSection, 'mixin', _('API Settings'));
+		s.addremove = false;
+		s.anonymous = true;
 
-		o = s.option(form.Value, 'api_port', _('API Port'));
-		o.datatype = 'port';
+		o = s.option(form.Value, 'api_listen', _('API Listen'));
+		o.datatype = 'string';
 
+		o = s.option(form.Value, 'external_controller', _('External Controller'));
+		o.datatype = 'string';
+
+		// 流量统计设置
 		s = m.section(form.TypedSection, 'traffic', _('Traffic Statistics'));
 		s.addremove = false;
 		s.anonymous = true;
