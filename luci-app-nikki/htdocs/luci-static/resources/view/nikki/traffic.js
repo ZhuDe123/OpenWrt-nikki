@@ -52,8 +52,11 @@ return view.extend({
             else date = today;
         }
 
+        let url = L.url('admin/services/nikki/api/traffic_stats');
+        let params = new URLSearchParams({ period: period, date: date });
+        
         return L.resolveDefault(
-            request.get(L.url('admin/services/nikki/api/traffic_stats'), { period: period, date: date }),
+            request.get(url + '?' + params.toString()),
             { json: () => ({ minute: [], global: [], ip: [] }) }
         ).then(res => res.json()).then(data => {
             _this.renderChart(data, period);
