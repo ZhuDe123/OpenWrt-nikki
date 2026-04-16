@@ -43,15 +43,24 @@ return view.extend({
 
         let date = '';
         const dateInput = document.getElementById('date-input');
-        if (dateInput) {
+        
+        // 优先从日期输入框获取值
+        if (dateInput && dateInput.value) {
             date = dateInput.value;
         } else {
+            // 如果输入框为空，根据视图类型生成默认日期
             const today = new Date().toISOString().split('T')[0];
             const thisMonth = today.substring(0, 7);
             const thisYear = today.substring(0, 4);
             if (period === 'year') date = thisYear;
             else if (period === 'month') date = thisMonth;
             else date = today;
+        }
+        
+        // 日视图需要完整日期格式 (YYYY-MM-DD)
+        if (period === 'day' && date.length === 7) {
+            // 如果日期是月份格式 (2026-04)，转换为完整日期 (2026-04-01)
+            date = date + '-01';
         }
 
         console.log('[Traffic] Request params: period=' + period + ', date=' + date);
