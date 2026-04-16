@@ -197,33 +197,26 @@ log_info "API 监听地址：$API_LISTEN"
 
 # 测试 API 连接
 if command -v curl >/dev/null 2>&1; then
-    # 测试 API 是否可访问
-    API_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/version" 2>&1)
+    # 直接测试流量统计接口，不再依赖 /version
+    SUMMARY_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/summary" 2>&1)
 
-    if echo "$API_RESPONSE" | grep -q "version\|premium"; then
-        check_pass "Mihomo API 可正常访问"
-
-        # 优先测试新版 API (/traffic/summary)
-        SUMMARY_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/summary" 2>&1)
-
-        if echo "$SUMMARY_RESPONSE" | grep -q "upTotal"; then
-            check_pass "新版 API (/traffic/summary) 返回正常"
-            UP_TOTAL=$(echo "$SUMMARY_RESPONSE" | grep -o '"upTotal":[0-9]*' | cut -d':' -f2)
-            DOWN_TOTAL=$(echo "$SUMMARY_RESPONSE" | grep -o '"downTotal":[0-9]*' | cut -d':' -f2)
+    if echo "$SUMMARY_RESPONSE" | grep -q "upTotal"; then
+        check_pass "Mihomo API 可正常访问 (支持 /traffic/summary)"
+        UP_TOTAL=$(echo "$SUMMARY_RESPONSE" | grep -o '"upTotal":[0-9]*' | cut -d':' -f2)
+        DOWN_TOTAL=$(echo "$SUMMARY_RESPONSE" | grep -o '"downTotal":[0-9]*' | cut -d':' -f2)
+        log_info "当前流量：上传=${UP_TOTAL:-0}B, 下载=${DOWN_TOTAL:-0}B"
+    else
+        # 兼容检查旧版 API
+        TRAFFIC_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/latest" 2>&1)
+        if echo "$TRAFFIC_RESPONSE" | grep -q "upTotal"; then
+            check_warn "Mihomo API 连通，但不支持新版接口 /traffic/summary"
+            check_warn "当前使用旧版接口 /traffic/latest，流量统计功能仍可工作"
+            UP_TOTAL=$(echo "$TRAFFIC_RESPONSE" | grep -o '"upTotal":[0-9]*' | cut -d':' -f2)
+            DOWN_TOTAL=$(echo "$TRAFFIC_RESPONSE" | grep -o '"downTotal":[0-9]*' | cut -d':' -f2)
             log_info "当前流量：上传=${UP_TOTAL:-0}B, 下载=${DOWN_TOTAL:-0}B"
         else
-            # 兼容检查旧版 API
-            TRAFFIC_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/latest" 2>&1)
-            if echo "$TRAFFIC_RESPONSE" | grep -q "upTotal"; then
-                check_warn "新版 API (/traffic/summary) 不可用，但旧版 (/traffic/latest) 正常"
-                check_warn "建议升级内核以支持流量统计功能"
-            else
-                check_fail "流量 API 均不可用 (检查内核版本或 Secret)"
-            fi
+            check_fail "无法获取流量数据 (请检查端口 $API_PORT 和 Secret)"
         fi
-    else
-        check_fail "无法连接到 Mihomo API (端口：$API_PORT)"
-        log_info "请检查 mihomo 是否运行：/etc/init.d/nikki status"
     fi
 else
     check_warn "curl 命令不可用，无法测试 API"
