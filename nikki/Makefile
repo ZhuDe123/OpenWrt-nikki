@@ -70,6 +70,13 @@ define Package/nikki/install
 	$(INSTALL_BIN) $(CURDIR)/files/scripts/include.sh $(1)/etc/nikki/scripts/include.sh
 	$(INSTALL_BIN) $(CURDIR)/files/scripts/firewall_include.sh $(1)/etc/nikki/scripts/firewall_include.sh
 	$(INSTALL_BIN) $(CURDIR)/files/scripts/debug.sh $(1)/etc/nikki/scripts/debug.sh
+	$(INSTALL_BIN) $(CURDIR)/files/scripts/traffic-collect.sh $(1)/etc/nikki/scripts/traffic-collect.sh
+	$(INSTALL_BIN) $(CURDIR)/files/scripts/traffic-test.sh $(1)/etc/nikki/scripts/traffic-test.sh
+	$(INSTALL_DATA) $(CURDIR)/files/scripts/TRAFFIC_TEST_GUIDE.md $(1)/etc/nikki/scripts/TRAFFIC_TEST_GUIDE.md
+
+	# 创建便捷命令符号链接
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(LN) /etc/nikki/scripts/traffic-test.sh $(1)/usr/bin/nikki-traffic-test
 
 	$(INSTALL_BIN) $(CURDIR)/files/nftables/geoip_cn.nft $(1)/etc/nikki/nftables/geoip_cn.nft
 	$(INSTALL_BIN) $(CURDIR)/files/nftables/geoip6_cn.nft $(1)/etc/nikki/nftables/geoip6_cn.nft

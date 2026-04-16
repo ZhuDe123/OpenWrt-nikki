@@ -192,21 +192,49 @@ return view.extend({
         o = s.taboption('traffic_stats', form.Flag, 'traffic_enabled', _('Enable Traffic Statistics'));
         o.rmempty = false;
         o.description = _('Enable traffic collection and storage');
+        o.cfgvalue = function() {
+            return uci.get('nikki', 'traffic', 'enabled') || '0';
+        };
+        o.write = function(section_id, value) {
+            uci.set('nikki', 'traffic', 'enabled', value);
+            uci.save('nikki');
+        };
 
         o = s.taboption('traffic_stats', form.Value, 'traffic_collect_interval', _('Collection Interval (seconds)'));
         o.datatype = 'uinteger';
         o.placeholder = '30';
         o.depends('traffic_enabled', '1');
+        o.cfgvalue = function() {
+            return uci.get('nikki', 'traffic', 'collect_interval') || '30';
+        };
+        o.write = function(section_id, value) {
+            uci.set('nikki', 'traffic', 'collect_interval', value);
+            uci.save('nikki');
+        };
 
         o = s.taboption('traffic_stats', form.Value, 'traffic_retain_days', _('Data Retention Days'));
         o.datatype = 'uinteger';
         o.placeholder = '30';
         o.depends('traffic_enabled', '1');
+        o.cfgvalue = function() {
+            return uci.get('nikki', 'traffic', 'retain_days') || '30';
+        };
+        o.write = function(section_id, value) {
+            uci.set('nikki', 'traffic', 'retain_days', value);
+            uci.save('nikki');
+        };
 
         o = s.taboption('traffic_stats', form.Value, 'traffic_db_path', _('Database Path'));
         o.placeholder = '/tmp/nikki/traffic.db';
         o.depends('traffic_enabled', '1');
         o.description = _('SQLite database file path, recommend using /tmp (RAM) to protect flash storage');
+        o.cfgvalue = function() {
+            return uci.get('nikki', 'traffic', 'db_path') || '/tmp/nikki/traffic.db';
+        };
+        o.write = function(section_id, value) {
+            uci.set('nikki', 'traffic', 'db_path', value);
+            uci.save('nikki');
+        };
 
         return m.render();
     }

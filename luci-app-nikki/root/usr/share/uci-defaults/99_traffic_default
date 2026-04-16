@@ -2,6 +2,7 @@
 # /usr/share/uci-defaults/99_traffic_default
 
 # 创建流量统计配置
+# 默认不启用流量统计，如需启用请执行：uci set nikki.traffic.enabled='1'
 uci -q batch <<-EOF > /dev/null
 	set nikki.traffic=traffic
 	set nikki.traffic.enabled='0'

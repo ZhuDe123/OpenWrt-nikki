@@ -253,6 +253,9 @@ start_service() {
 	fi
 	# set started flag
 	touch "$STARTED_FLAG_PATH"
+	
+	# 启动流量统计服务
+	traffic_stats_control "start"
 }
 
 service_started() {
@@ -385,6 +388,8 @@ service_started() {
 }
 
 service_stopped() {
+	# 停止流量统计服务
+	traffic_stats_control "stop"
 	cleanup
 }
 
@@ -551,4 +556,52 @@ update_subscription() {
 		rm -f "$subscription_tmpfile"
 	fi
 	uci_commit "nikki"
+}
+
+# 流量统计服务管理
+traffic_stats_control() {
+	local action="$1"
+	local traffic_enabled traffic_collect_interval
+	
+	# 检查流量统计配置
+	traffic_enabled=$(uci -q get nikki.traffic.enabled)
+	traffic_collect_interval=$(uci -q get nikki.traffic.collect_interval)
+	traffic_collect_interval=${traffic_collect_interval:-30}
+	
+	if [ "$action" = "start" ] && [ "$traffic_enabled" = "1" ]; then
+		# 检查是否已在运行
+		if [ -f "/var/run/nikki-traffic.pid" ]; then
+			local old_pid=$(cat "/var/run/nikki-traffic.pid")
+			if kill -0 "$old_pid" 2>/dev/null; then
+				log "Traffic" "Traffic statistics already running (PID: $old_pid)"
+				return 0
+			fi
+		fi
+		
+		# 限制日志文件大小（保留最近 100 行）
+		if [ -f "/tmp/nikki/traffic.log" ]; then
+			local log_size=$(wc -l < /tmp/nikki/traffic.log 2>/dev/null || echo "0")
+			if [ "$log_size" -gt 1000 ]; then
+				tail -n 100 /tmp/nikki/traffic.log > /tmp/nikki/traffic.log.tmp
+				mv /tmp/nikki/traffic.log.tmp /tmp/nikki/traffic.log
+			fi
+		fi
+		
+		# 启动流量统计采集
+		mkdir -p /tmp/nikki
+		( while true; do /usr/bin/ucode /etc/nikki/ucode/traffic.uc collect; sleep $traffic_collect_interval; done ) </dev/null >/tmp/nikki/traffic.log 2>&1 &
+		echo $! > /var/run/nikki-traffic.pid
+		log "Traffic" "Traffic statistics started (interval: ${traffic_collect_interval}s, PID: $(cat /var/run/nikki-traffic.pid))"
+		
+	elif [ "$action" = "stop" ]; then
+		# 停止流量统计采集
+		if [ -f "/var/run/nikki-traffic.pid" ]; then
+			local pid=$(cat "/var/run/nikki-traffic.pid")
+			if kill -0 "$pid" 2>/dev/null; then
+				kill "$pid"
+				log "Traffic" "Traffic statistics stopped (PID: $pid)"
+			fi
+			rm -f "/var/run/nikki-traffic.pid"
+		fi
+	fi
 }

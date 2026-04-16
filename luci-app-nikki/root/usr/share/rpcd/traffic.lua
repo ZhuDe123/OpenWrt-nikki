@@ -5,10 +5,11 @@
 local util = require "luci.util"
 local http = require "luci.http"
 local json = require "luci.jsonc"
+local uci = require "luci.model.uci".cursor()
 
 module("luci.rpc.traffic", package.seeall)
 
-local API_SECRET = "163177"
+local API_SECRET = uci:get_first("nikki", "mixin", "api_secret", "")
 
 function traffic_stats()
     local period = http.formvalue("period") or "day"

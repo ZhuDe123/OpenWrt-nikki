@@ -1,0 +1,82 @@
+#!/bin/sh
+# /usr/share/uci-defaults/98_nikki_syntax_check
+# Nikki 安装时语法检查脚本
+# 仅在路由器安装时运行，编译时跳过
+
+# 检测是否在路由器上运行
+if [ ! -f "/etc/config/nikki" ] && [ ! -f "/etc/init.d/nikki" ]; then
+    # 编译环境，跳过语法检查
+    exit 0
+fi
+
+echo "========================================"
+echo "   Nikki 语法检查"
+echo "========================================"
+
+ERRORS=0
+
+# 检查 ucode 语法
+echo "[1/4] 检查 ucode 脚本..."
+for f in /etc/nikki/ucode/*.uc; do
+    [ -f "$f" ] || continue
+    echo -n "  - $f: "
+    if /usr/bin/ucode -c "$f" 2>/dev/null; then
+        echo "OK"
+    else
+        echo "FAIL"
+        /usr/bin/ucode -c "$f" 2>&1 | head -3
+        ERRORS=$((ERRORS + 1))
+    fi
+done
+
+# 检查 shell 脚本语法
+echo "[2/4] 检查 shell 脚本..."
+for f in /etc/nikki/scripts/*.sh; do
+    [ -f "$f" ] || continue
+    echo -n "  - $f: "
+    if bash -n "$f" 2>/dev/null; then
+        echo "OK"
+    else
+        echo "FAIL"
+        bash -n "$f" 2>&1 | head -3
+        ERRORS=$((ERRORS + 1))
+    fi
+done
+
+# 检查 Lua 脚本语法
+echo "[3/4] 检查 Lua 脚本..."
+if command -v luac >/dev/null 2>&1; then
+    for f in /usr/share/rpcd/traffic.lua /usr/lib/lua/luci/controller/nikki.lua; do
+        [ -f "$f" ] || continue
+        echo -n "  - $f: "
+        if luac -p "$f" 2>/dev/null; then
+            echo "OK"
+        else
+            echo "FAIL"
+            luac -p "$f" 2>&1 | head -3
+            ERRORS=$((ERRORS + 1))
+        fi
+    done
+else
+    echo "  - luac 未安装，跳过 Lua 检查"
+fi
+
+# 检查必要依赖
+echo "[4/4] 检查必要依赖..."
+if command -v sqlite3 >/dev/null 2>&1; then
+    echo "  - sqlite3: OK"
+else
+    echo "  - sqlite3: 未安装 (流量统计将无法使用)"
+    echo "    请执行：opkg install sqlite3-cli"
+fi
+
+echo ""
+echo "========================================"
+
+if [ $ERRORS -gt 0 ]; then
+    echo "发现 $ERRORS 个错误，请检查修复！"
+    exit 1
+else
+    echo "所有检查通过！"
+    exit 0
+fi
