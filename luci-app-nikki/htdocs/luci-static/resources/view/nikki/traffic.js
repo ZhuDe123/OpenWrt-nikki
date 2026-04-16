@@ -10,6 +10,10 @@ return view.extend({
     pollInterval: 30000,  // 30 秒刷新一次（与采集间隔一致）
     currentPeriod: 'day',  // 当前视图类型：day/month/year
     pollBound: null,  // 保存轮询函数引用，用于页面卸载时清理
+    ipTableData: [],  // 保存所有 IP 数据
+    currentPage: 1,  // 当前页码
+    pageSize: 10,  // 每页显示 10 条
+    searchTerm: '',  // 搜索关键词
 
     // 页面卸载时停止轮询
     handlePageLeave: function() {
@@ -63,6 +67,9 @@ return view.extend({
             date = date + '-01';
         }
 
+        // 获取搜索关键词
+        let searchTerm = document.getElementById('ip-search-input')?.value || '';
+
         console.log('[Traffic] Request params: period=' + period + ', date=' + date);
 
         // 构建 URL 参数
@@ -77,7 +84,7 @@ return view.extend({
         }).then(function(data) {
             console.log('[Traffic] Response data:', data);
             _this.renderChart(data, period);
-            _this.updateTable(data.ip || []);
+            _this.updateTable(data.ip || []);  // 更新表格（自动使用当前搜索词和分页）
             _this.updateSummary(data.global || data.monthly || data.daily || []);
 
             const chartEl = document.getElementById('traffic-chart');
@@ -293,37 +300,119 @@ return view.extend({
         });
     },
 
-    // 更新 IP 表格
+    // 更新 IP 表格（支持搜索和分页）
     updateTable: function(ipData) {
+        let _this = this;
         let tbody = document.getElementById('ip-table-body');
         if (!tbody) return;
 
-        tbody.innerHTML = '';
-
-        // 确保 ipData 是数组
+        // 保存所有数据
         let ipArray = [];
         if (Array.isArray(ipData)) {
             ipArray = ipData;
         } else if (ipData && typeof ipData === 'object') {
-            // 如果是对象，尝试转换为数组
             ipArray = Object.values(ipData) || [];
         }
+        this.ipTableData = ipArray;
 
-        if (!ipArray || ipArray.length === 0) {
+        // 过滤数据（支持模糊搜索）
+        let filteredArray = ipArray;
+        if (this.searchTerm && this.searchTerm.trim()) {
+            let term = this.searchTerm.toLowerCase().trim();
+            filteredArray = ipArray.filter(row => {
+                let ip = (row.ip || row.ip_address || '').toLowerCase();
+                return ip.includes(term);
+            });
+            console.log('[Traffic] Search filter: "' + term + '", found ' + filteredArray.length + ' of ' + ipArray.length);
+        }
+
+        // 计算分页
+        let totalPages = Math.ceil(filteredArray.length / this.pageSize);
+        if (this.currentPage > totalPages) this.currentPage = Math.max(1, totalPages);
+        if (this.currentPage < 1) this.currentPage = 1;
+
+        let startIndex = (this.currentPage - 1) * this.pageSize;
+        let endIndex = startIndex + this.pageSize;
+        let pageData = filteredArray.slice(startIndex, endIndex);
+
+        console.log('[Traffic] Page ' + this.currentPage + '/' + totalPages + ', showing ' + pageData.length + ' of ' + filteredArray.length);
+
+        tbody.innerHTML = '';
+
+        if (!pageData || pageData.length === 0) {
             tbody.appendChild(E('tr', { 'class': 'tr' }, [
-                E('td', { 'class': 'td', 'colspan': '4' }, _('No data available'))
+                E('td', { 'class': 'td', 'colspan': '4' }, 
+                    this.searchTerm ? _('No matching IP found') : _('No data available'))
             ]));
+        } else {
+            pageData.forEach(row => {
+                tbody.appendChild(E('tr', { 'class': 'tr' }, [
+                    E('td', { 'class': 'td' }, row.ip || row.ip_address || _('Unknown')),
+                    E('td', { 'class': 'td' }, this.formatBytes(row.upload || 0)),
+                    E('td', { 'class': 'td' }, this.formatBytes(row.download || 0)),
+                    E('td', { 'class': 'td' }, this.formatBytes((row.upload || 0) + (row.download || 0)))
+                ]));
+            });
+        }
+
+        // 更新分页控件
+        this.updatePagination(totalPages);
+    },
+
+    // 更新分页控件
+    updatePagination: function(totalPages) {
+        let pagination = document.getElementById('ip-pagination');
+        if (!pagination) return;
+
+        pagination.innerHTML = '';
+
+        if (totalPages <= 1) {
+            pagination.style.display = 'none';
             return;
         }
 
-        ipArray.forEach(row => {
-            tbody.appendChild(E('tr', { 'class': 'tr' }, [
-                E('td', { 'class': 'td' }, row.ip || row.ip_address || _('Unknown')),
-                E('td', { 'class': 'td' }, this.formatBytes(row.upload || 0)),
-                E('td', { 'class': 'td' }, this.formatBytes(row.download || 0)),
-                E('td', { 'class': 'td' }, this.formatBytes((row.upload || 0) + (row.download || 0)))
-            ]));
-        });
+        pagination.style.display = 'flex';
+
+        // 上一页
+        let prevBtn = E('button', {
+            'class': 'cbi-button cbi-button-prev',
+            'disabled': this.currentPage === 1 ? 'disabled' : null,
+            'click': () => {
+                if (this.currentPage > 1) {
+                    this.currentPage--;
+                    this.updateTable(this.ipTableData);
+                }
+            }
+        }, '← ' + _('Prev'));
+
+        // 页码显示
+        let pageInfo = E('span', {
+            'class': 'pagination-info',
+            'style': 'margin: 0 10px; align-self: center;'
+        }, this.currentPage + ' / ' + totalPages);
+
+        // 下一页
+        let nextBtn = E('button', {
+            'class': 'cbi-button cbi-button-next',
+            'disabled': this.currentPage === totalPages ? 'disabled' : null,
+            'click': () => {
+                if (this.currentPage < totalPages) {
+                    this.currentPage++;
+                    this.updateTable(this.ipTableData);
+                }
+            }
+        }, _('Next') + ' →');
+
+        pagination.appendChild(prevBtn);
+        pagination.appendChild(pageInfo);
+        pagination.appendChild(nextBtn);
+    },
+
+    // 设置搜索关键词并刷新表格
+    setSearchTerm: function(term) {
+        this.searchTerm = term;
+        this.currentPage = 1;  // 重置到第一页
+        this.updateTable(this.ipTableData);
     },
 
     // 更新摘要
@@ -423,7 +512,19 @@ return view.extend({
                 E('canvas', { 'id': 'traffic-chart' })
             ]),
             E('div', { 'class': 'cbi-section' }, [
-                E('h3', { 'id': 'ip-table-title' }, _('Top IP Traffic')),
+                E('div', { 'style': 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;' }, [
+                    E('h3', { 'id': 'ip-table-title' }, _('Top IP Traffic')),
+                    E('input', {
+                        'id': 'ip-search-input',
+                        'type': 'text',
+                        'class': 'cbi-input-text',
+                        'placeholder': _('Search IP...'),
+                        'style': 'width: 200px;',
+                        'input': (e) => {
+                            _this.setSearchTerm(e.target.value);
+                        }
+                    })
+                ]),
                 E('table', { 'class': 'table', 'id': 'ip-table' }, [
                     E('tr', { 'class': 'tr table-titles' }, [
                         E('th', { 'class': 'th' }, _('IP Address')),
@@ -432,7 +533,12 @@ return view.extend({
                         E('th', { 'class': 'th' }, _('Total'))
                     ]),
                     E('tbody', { 'id': 'ip-table-body' })
-                ])
+                ]),
+                E('div', {
+                    'id': 'ip-pagination',
+                    'class': 'cbi-page-control',
+                    'style': 'display: flex; justify-content: center; margin-top: 10px;'
+                })
             ])
         ]);
 
