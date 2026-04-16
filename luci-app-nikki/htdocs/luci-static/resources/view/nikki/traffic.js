@@ -48,9 +48,14 @@ return view.extend({
         let date = '';
         const dateInput = document.getElementById('date-input');
         
+        // 调试：打印日期输入框的当前值
+        let inputValue = dateInput ? dateInput.value : 'NULL';
+        let inputType = dateInput ? dateInput.type : 'NULL';
+        console.log('[Traffic] Date input: type=' + inputType + ', value=' + inputValue);
+        
         // 优先从日期输入框获取值
-        if (dateInput && dateInput.value) {
-            date = dateInput.value;
+        if (dateInput && dateInput.value && dateInput.value.trim()) {
+            date = dateInput.value.trim();
         } else {
             // 如果输入框为空，根据视图类型生成默认日期
             const today = new Date().toISOString().split('T')[0];
@@ -59,16 +64,19 @@ return view.extend({
             if (period === 'year') date = thisYear;
             else if (period === 'month') date = thisMonth;
             else date = today;
+            console.log('[Traffic] Using default date: ' + date);
         }
         
         // 日视图需要完整日期格式 (YYYY-MM-DD)
-        if (period === 'day' && date.length === 7) {
-            // 如果日期是月份格式 (2026-04)，转换为完整日期 (2026-04-01)
-            date = date + '-01';
+        if (period === 'day') {
+            if (date.length === 7 && date.match(/^\d{4}-\d{2}$/)) {
+                console.log('[Traffic] Warning: Month format detected, converting to day format');
+                date = date + '-01';
+            } else if (date.length === 4 && date.match(/^\d{4}$/)) {
+                console.log('[Traffic] Warning: Year format detected, converting to day format');
+                date = date + '-01-01';
+            }
         }
-
-        // 获取搜索关键词
-        let searchTerm = document.getElementById('ip-search-input')?.value || '';
 
         console.log('[Traffic] Request params: period=' + period + ', date=' + date);
 
@@ -462,6 +470,24 @@ return view.extend({
             dateInput.value = thisYear;
             console.log('[Traffic] Year input set to: ' + thisYear);
         }
+    },
+
+    // 获取当前日期（根据当前视图类型）
+    getCurrentDate: function() {
+        let period = document.getElementById('period-select')?.value || 'day';
+        const dateInput = document.getElementById('date-input');
+        
+        if (dateInput && dateInput.value && dateInput.value.trim()) {
+            return dateInput.value.trim();
+        }
+        
+        const today = new Date().toISOString().split('T')[0];
+        const thisMonth = today.substring(0, 7);
+        const thisYear = today.substring(0, 4);
+        
+        if (period === 'year') return thisYear;
+        if (period === 'month') return thisMonth;
+        return today;
     },
 
     render: function() {
