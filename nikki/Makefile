@@ -4,28 +4,30 @@ PKG_NAME:=nikki
 PKG_VERSION:=2025.12.21
 PKG_RELEASE:=1
 
-PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
-PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
-PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/MetaCubeX/mihomo.git
-PKG_SOURCE_VERSION:=v1.19.18
-PKG_MIRROR_HASH:=4da31e2bc1607fadaea8bd4c83252acd7ba1070c64e4098e3020da63e3464e68
+# --- 修改开始：跳过源码下载，使用本地二进制 ---
+# PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
+# PKG_SOURCE_SUBDIR:=$(PKG_NAME)-$(PKG_VERSION)
+# PKG_SOURCE_PROTO:=git
+# PKG_SOURCE_URL:=https://github.com/MetaCubeX/mihomo.git
+# PKG_SOURCE_VERSION:=v1.19.18
+# PKG_MIRROR_HASH:=4da31e2bc1607fadaea8bd4c83252acd7ba1070c64e4098e3020da63e3464e68
+
+# PKG_BUILD_DEPENDS:=golang/host
+# PKG_BUILD_PARALLEL:=1
+# PKG_BUILD_FLAGS:=no-mips16
+
+# PKG_BUILD_TIME:=$(shell date -u -Iseconds)
+
+# GO_PKG:=github.com/metacubex/mihomo
+# GO_PKG_LDFLAGS_X:=$(GO_PKG)/constant.Version=$(PKG_SOURCE_VERSION) $(GO_PKG)/constant.BuildTime=$(PKG_BUILD_TIME)
+# GO_PKG_TAGS:=with_gvisor
+# --- 修改结束 ---
 
 PKG_LICENSE:=GPL3.0+
 PKG_MAINTAINER:=Joseph Mory <morytyann@gmail.com>
 
-PKG_BUILD_DEPENDS:=golang/host
-PKG_BUILD_PARALLEL:=1
-PKG_BUILD_FLAGS:=no-mips16
-
-PKG_BUILD_TIME:=$(shell date -u -Iseconds)
-
-GO_PKG:=github.com/metacubex/mihomo
-GO_PKG_LDFLAGS_X:=$(GO_PKG)/constant.Version=$(PKG_SOURCE_VERSION) $(GO_PKG)/constant.BuildTime=$(PKG_BUILD_TIME)
-GO_PKG_TAGS:=with_gvisor
-
 include $(INCLUDE_DIR)/package.mk
-include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
+# include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk  <-- 注释掉 Go 编译框架
 
 define Package/nikki
   SECTION:=net
@@ -46,7 +48,9 @@ define Package/nikki/conffiles
 endef
 
 define Package/nikki/install
-	$(call GoPackage/Package/Install/Bin,$(1))
+	# 安装本地二进制文件 (跳过 Go 编译)
+	$(INSTALL_DIR) $(1)/usr/bin
+	$(INSTALL_BIN) $(CURDIR)/files/bin/mihomo $(1)/usr/bin/mihomo
 
 	$(INSTALL_DIR) $(1)/etc/nikki
 	$(INSTALL_DIR) $(1)/etc/nikki/ucode
@@ -107,10 +111,13 @@ if [ -z $${IPKG_INSTROOT} ]; then
 fi
 endef
 
-define Build/Prepare
-	$(Build/Prepare/Default)
-	$(RM) -r $(PKG_BUILD_DIR)/rules/logic_test
+# define Build/Prepare
+# 	$(Build/Prepare/Default)
+# 	$(RM) -r $(PKG_BUILD_DIR)/rules/logic_test
+# endef
+
+define Build/Compile
+	# 跳过编译，直接使用本地二进制
 endef
 
-$(eval $(call GoBinPackage,nikki))
 $(eval $(call BuildPackage,nikki))
