@@ -123,7 +123,8 @@ return view.extend({
         if (period === 'year') {
             // 年度视图：柱状图，显示 12 个月
             chartType = 'bar';
-            if (data.monthly && data.monthly.length > 0) {
+            console.log('[Traffic] Year view - data.monthly:', data.monthly);
+            if (data.monthly && Array.isArray(data.monthly) && data.monthly.length > 0) {
                 labels = data.monthly.map(d => {
                     const month = (d.month || '').split('-')[1] || '';
                     return month ? month + '月' : '';
@@ -131,6 +132,7 @@ return view.extend({
                 upData = data.monthly.map(d => d.upload || 0);
                 downData = data.monthly.map(d => d.download || 0);
             } else {
+                console.log('[Traffic] Year view - No monthly data, using empty arrays');
                 labels = [];
                 upData = [];
                 downData = [];
@@ -138,7 +140,8 @@ return view.extend({
         } else if (period === 'month') {
             // 月份视图：柱状图，显示每天
             chartType = 'bar';
-            if (data.daily && data.daily.length > 0) {
+            console.log('[Traffic] Month view - data.daily:', data.daily);
+            if (data.daily && Array.isArray(data.daily) && data.daily.length > 0) {
                 labels = data.daily.map(d => {
                     const day = (d.date || '').split('-')[2] || '';
                     return day ? day + '日' : '';
@@ -146,6 +149,7 @@ return view.extend({
                 upData = data.daily.map(d => d.upload || 0);
                 downData = data.daily.map(d => d.download || 0);
             } else {
+                console.log('[Traffic] Month view - No daily data, using empty arrays');
                 labels = [];
                 upData = [];
                 downData = [];
@@ -153,11 +157,13 @@ return view.extend({
         } else if (period === 'day') {
             // 日视图：折线图，显示每分钟
             chartType = 'line';
-            if (data.minute && data.minute.length > 0) {
+            console.log('[Traffic] Day view - data.minute:', data.minute);
+            if (data.minute && Array.isArray(data.minute) && data.minute.length > 0) {
                 labels = data.minute.map(d => d.time || '');
                 upData = data.minute.map(d => d.upload || 0);
                 downData = data.minute.map(d => d.download || 0);
             } else {
+                console.log('[Traffic] Day view - No minute data, using empty arrays');
                 labels = [];
                 upData = [];
                 downData = [];
@@ -168,6 +174,8 @@ return view.extend({
             upData = [];
             downData = [];
         }
+        
+        console.log('[Traffic] Chart data - labels:', labels.length, 'upData:', upData.length, 'downData:', downData.length);
 
         this.chart = new Chart(canvas.getContext('2d'), {
             type: chartType,
@@ -348,17 +356,22 @@ return view.extend({
         const thisMonth = today.substring(0, 7);
         const thisYear = today.substring(0, 4);
 
+        console.log('[Traffic] updateDateInput: period=' + period);
+
         if (period === 'day') {
             dateInput.type = 'date';
             dateInput.value = today;
+            console.log('[Traffic] Day input set to: ' + today);
         } else if (period === 'month') {
             dateInput.type = 'month';
             dateInput.value = thisMonth;
+            console.log('[Traffic] Month input set to: ' + thisMonth);
         } else if (period === 'year') {
             dateInput.type = 'number';
             dateInput.min = '2020';
             dateInput.max = '2030';
             dateInput.value = thisYear;
+            console.log('[Traffic] Year input set to: ' + thisYear);
         }
     },
 
@@ -374,8 +387,10 @@ return view.extend({
                 'id': 'period-select',
                 'class': 'cbi-input-select',
                 'change': (e) => {
+                    let newPeriod = e.target.value;
+                    console.log('[Traffic] Period changed to: ' + newPeriod);
+                    _this.updateDateInput(newPeriod);
                     _this.loadTrafficData();
-                    _this.updateDateInput(e.target.value);
                 }
             }, [
                 E('option', { 'value': 'day' }, _('Daily View')),
@@ -388,7 +403,10 @@ return view.extend({
                 'type': 'month',
                 'class': 'cbi-input-text',
                 'value': thisMonth,
-                'change': () => _this.loadTrafficData()
+                'change': () => {
+                    console.log('[Traffic] Date input changed');
+                    _this.loadTrafficData();
+                }
             }),
             E('button', {
                 'class': 'cbi-button cbi-button-action',
