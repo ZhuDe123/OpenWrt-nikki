@@ -134,6 +134,31 @@ function collect_traffic() {
             }
         }
 
+        // 2.1 获取上一次的累计值（用于计算增量）
+        let last_up_total = 0;
+        let last_down_total = 0;
+        let last_query = sprintf("sqlite3 %s \"SELECT upload, download FROM traffic_minute WHERE date = '%s' AND time = '%s';\"",
+            shell_quote(DB_PATH), today_str, time_str);
+        let last_p = popen(last_query);
+        if (last_p) {
+            let last_line = last_p.read('line');
+            if (last_line) {
+                let parts = split(last_line, "|");
+                if (length(parts) >= 2) {
+                    last_up_total = int(parts[0]) || 0;
+                    last_down_total = int(parts[1]) || 0;
+                }
+            }
+            last_p.close();
+        }
+
+        // 2.2 计算增量（当前值 - 上次值）
+        // 如果差值为负，说明计数器重置，直接使用当前值
+        let up_delta = up_total - last_up_total;
+        let down_delta = down_total - last_down_total;
+        if (up_delta < 0) up_delta = up_total;
+        if (down_delta < 0) down_delta = down_total;
+
         // 4. 写入数据库（使用事务合并所有写入，减少进程启动开销）
         let now = time();
 
@@ -147,28 +172,28 @@ function collect_traffic() {
         // 构建批量 SQL 事务
         let sql_batch = "BEGIN TRANSACTION;\n";
 
-        // 全局总量（日）
+        // 全局总量（日）- 存储当天累计值
         sql_batch += sprintf(
             "INSERT INTO traffic_daily VALUES ('%s', %d, %d, %d) ON CONFLICT(date) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
             today_str, up_total, down_total, now, up_total, down_total, now
         );
 
-        // 全局总量（月）
+        // 全局总量（月）- 存储当月累计值
         sql_batch += sprintf(
             "INSERT INTO traffic_monthly VALUES ('%s', %d, %d, %d) ON CONFLICT(month) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
             month_str, up_total, down_total, now, up_total, down_total, now
         );
 
-        // 年度总量
+        // 年度总量 - 存储当年累计值
         sql_batch += sprintf(
             "INSERT INTO traffic_yearly VALUES ('%s', %d, %d, %d) ON CONFLICT(year) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
             year_str, up_total, down_total, now, up_total, down_total, now
         );
 
-        // 分钟级数据
+        // 分钟级数据 - 存储本分钟增量（这一分钟的流量）
         sql_batch += sprintf(
             "INSERT INTO traffic_minute VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, time) DO UPDATE SET upload=%d, download=%d;\n",
-            today_str, time_str, up_total, down_total, up_total, down_total
+            today_str, time_str, up_delta, down_delta, up_delta, down_delta
         );
 
         // IP 统计（批量写入）
