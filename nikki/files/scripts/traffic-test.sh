@@ -199,31 +199,27 @@ log_info "API 监听地址：$API_LISTEN"
 if command -v curl >/dev/null 2>&1; then
     # 测试 API 是否可访问
     API_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/version" 2>&1)
-    
-    if echo "$API_RESPONSE" | grep -q "version"; then
+
+    if echo "$API_RESPONSE" | grep -q "version\|premium"; then
         check_pass "Mihomo API 可正常访问"
-        
-        # 测试流量 API
-        TRAFFIC_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/latest" 2>&1)
-        
-        if echo "$TRAFFIC_RESPONSE" | grep -q "upTotal\|downTotal"; then
-            check_pass "流量 API (/traffic/latest) 返回正常"
-            
-            # 解析并显示当前流量
-            UP_TOTAL=$(echo "$TRAFFIC_RESPONSE" | grep -o '"upTotal":[0-9]*' | cut -d':' -f2)
-            DOWN_TOTAL=$(echo "$TRAFFIC_RESPONSE" | grep -o '"downTotal":[0-9]*' | cut -d':' -f2)
+
+        # 优先测试新版 API (/traffic/summary)
+        SUMMARY_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/summary" 2>&1)
+
+        if echo "$SUMMARY_RESPONSE" | grep -q "upTotal"; then
+            check_pass "新版 API (/traffic/summary) 返回正常"
+            UP_TOTAL=$(echo "$SUMMARY_RESPONSE" | grep -o '"upTotal":[0-9]*' | cut -d':' -f2)
+            DOWN_TOTAL=$(echo "$SUMMARY_RESPONSE" | grep -o '"downTotal":[0-9]*' | cut -d':' -f2)
             log_info "当前流量：上传=${UP_TOTAL:-0}B, 下载=${DOWN_TOTAL:-0}B"
         else
-            check_fail "流量 API 返回异常：$TRAFFIC_RESPONSE"
-        fi
-        
-        # 测试 IP 流量 API
-        IP_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/ip" 2>&1)
-        
-        if echo "$IP_RESPONSE" | grep -q "ipStats\|upload\|download"; then
-            check_pass "IP 流量 API (/traffic/ip) 返回正常"
-        else
-            check_warn "IP 流量 API 返回异常或无数据"
+            # 兼容检查旧版 API
+            TRAFFIC_RESPONSE=$(curl -s -m 3 -H "Authorization: Bearer $API_SECRET" "http://127.0.0.1:$API_PORT/traffic/latest" 2>&1)
+            if echo "$TRAFFIC_RESPONSE" | grep -q "upTotal"; then
+                check_warn "新版 API (/traffic/summary) 不可用，但旧版 (/traffic/latest) 正常"
+                check_warn "建议升级内核以支持流量统计功能"
+            else
+                check_fail "流量 API 均不可用 (检查内核版本或 Secret)"
+            fi
         fi
     else
         check_fail "无法连接到 Mihomo API (端口：$API_PORT)"
@@ -262,26 +258,24 @@ fi
 
 echo ""
 
-# ========== 7. 检查定时任务 ==========
-log_info "检查 7: 定时任务配置"
+# ========== 7. 检查服务状态 ==========
+log_info "检查 7: 服务状态"
 
-if crontab -l 2>/dev/null | grep -q "traffic.uc"; then
-    check_pass "流量统计定时任务已配置"
-    crontab -l 2>/dev/null | grep "traffic.uc" | while read line; do
-        log_info "  $line"
-    done
-else
-    check_warn "未发现流量统计定时任务"
-fi
-
-# 检查 systemd 或 procd 服务
 if [ -f "/etc/init.d/nikki-traffic" ]; then
     check_pass "nikki-traffic 服务脚本存在"
-    
-    if /etc/init.d/nikki-traffic enabled 2>/dev/null; then
-        check_pass "nikki-traffic 服务已启用"
+
+    if /etc/init.d/nikki-traffic running 2>/dev/null; then
+        check_pass "nikki-traffic 服务运行中"
     else
-        check_warn "nikki-traffic 服务未启用"
+        check_warn "nikki-traffic 服务未运行"
+    fi
+
+    # 检查实际进程
+    TRAFFIC_PID=$(ps | grep "traffic-collect.sh" | grep -v grep | awk '{print $1}' | head -1)
+    if [ -n "$TRAFFIC_PID" ]; then
+        check_pass "采集进程正在运行 (PID: $TRAFFIC_PID)"
+    else
+        check_warn "采集进程不存在"
     fi
 else
     check_warn "nikki-traffic 服务脚本不存在"
