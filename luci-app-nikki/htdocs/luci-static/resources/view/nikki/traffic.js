@@ -13,9 +13,10 @@ return view.extend({
 
     // 页面卸载时停止轮询
     handlePageLeave: function() {
-        if (this.pollBound) {
-            poll.remove(this.pollBound);
-            this.pollBound = null;
+        if (this._pollTimer) {
+            console.log('[Traffic] Page leave, stopping poll.');
+            clearInterval(this._pollTimer);
+            this._pollTimer = null;
         }
         // 销毁图表
         if (this.chart && typeof this.chart.destroy === 'function') {
@@ -35,6 +36,7 @@ return view.extend({
 
     // 加载流量数据
     loadTrafficData: function() {
+        console.log('[Traffic] Loading data...');
         let _this = this;
         let period = document.getElementById('period-select')?.value || 'day';
         this.currentPeriod = period;
@@ -52,24 +54,29 @@ return view.extend({
             else date = today;
         }
 
-        let url = L.url('admin/services/nikki/api/traffic_stats');
-        let params = new URLSearchParams({ period: period, date: date });
+        console.log('[Traffic] Request params: period=' + period + ', date=' + date);
+
+        // 构建 URL 参数
+        let baseUrl = L.url('admin/services/nikki/api/traffic_stats');
+        let sep = baseUrl.indexOf('?') === -1 ? '?' : '&';
+        let url = baseUrl + sep + 'period=' + encodeURIComponent(period) + '&date=' + encodeURIComponent(date);
         
-        return L.resolveDefault(
-            request.get(url + '?' + params.toString()),
-            { json: () => ({ minute: [], global: [], ip: [] }) }
-        ).then(res => res.json()).then(data => {
+        console.log('[Traffic] Request URL: ' + url);
+
+        return request.get(url).then(function(res) {
+            return res.json();
+        }).then(function(data) {
+            console.log('[Traffic] Response data:', data);
             _this.renderChart(data, period);
             _this.updateTable(data.ip || []);
             _this.updateSummary(data.global || data.monthly || data.daily || []);
 
-            // 修复：使用 classList 代替不存在的 dom.removeClass
             const chartEl = document.getElementById('traffic-chart');
             if (chartEl) {
                 chartEl.classList.remove('hidden');
             }
-        }).catch(e => {
-            console.error('Failed to load traffic data:', e);
+        }).catch(function(e) {
+            console.error('[Traffic] Failed to load traffic data:', e);
             ui.addNotification(null, E('p', _('Failed to load traffic data: ') + e));
         });
     },
@@ -403,17 +410,28 @@ return view.extend({
         ]);
 
         // 初始加载
-        this.loadTrafficData().then(() => {
-            // 绑定轮询函数
-            _this.pollBound = function() {
-                // 如果页面已经不存在于 DOM 中，停止轮询
-                if (!document.getElementById('traffic-chart')) {
-                    return false;
+        this.loadTrafficData();
+        
+        // 清除旧的定时器（如果存在）
+        if (this._pollTimer) {
+            clearInterval(this._pollTimer);
+        }
+
+        // 启动轮询（使用 setInterval 更可靠）
+        console.log('[Traffic] Starting poll, interval:', this.pollInterval, 'ms');
+        this._pollTimer = setInterval(function() {
+            // 检查页面元素是否存在，不存在则停止
+            if (!document.getElementById('traffic-chart')) {
+                console.log('[Traffic] Chart element not found, stopping poll.');
+                if (this._pollTimer) {
+                    clearInterval(this._pollTimer);
+                    this._pollTimer = null;
                 }
-                return _this.loadTrafficData();
-            };
-            poll.add(_this.pollBound, _this.pollInterval);
-        });
+                return;
+            }
+            console.log('[Traffic] Polling...');
+            _this.loadTrafficData();
+        }, this.pollInterval);
 
         // 监听页面切换事件，停止轮询
         document.addEventListener('uci:section-change', function() {

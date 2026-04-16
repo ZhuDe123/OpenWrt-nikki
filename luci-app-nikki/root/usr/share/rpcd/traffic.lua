@@ -16,13 +16,13 @@ local function sqlite_query(sql)
         util.shellquote(DB_PATH),
         util.shellquote(sql))
     local result = util.exec(cmd)
-    if result and result ~= "" then
+    if result and result ~= "" and result ~= "[]" then
         local parsed = json.parse(result)
         if parsed then
             return parsed
         end
     end
-    return {}
+    return {}  -- 返回空表而不是空数组，兼容前端
 end
 
 function traffic_stats()
@@ -44,6 +44,10 @@ function traffic_stats()
             date_val = os.date("%Y")
         end
     end
+
+    -- 调试日志
+    local debug_log = string.format("period=%s, date=%s", period, date_val)
+    http.header("X-Traffic-Debug", debug_log)
 
     local result = {}
 
