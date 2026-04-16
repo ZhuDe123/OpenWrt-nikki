@@ -35,10 +35,10 @@ return view.extend({
 
     // 加载流量数据
     loadTrafficData: function() {
-        const self = this;
+        let _this = this;
         let period = document.getElementById('period-select')?.value || 'day';
         this.currentPeriod = period;
-        
+
         let date = '';
         const dateInput = document.getElementById('date-input');
         if (dateInput) {
@@ -56,9 +56,9 @@ return view.extend({
             request.get(L.url('admin/services/nikki/api/traffic_stats'), { period: period, date: date }),
             { json: () => ({ minute: [], global: [], ip: [] }) }
         ).then(res => res.json()).then(data => {
-            self.renderChart(data, period);
-            self.updateTable(data.ip || []);
-            self.updateSummary(data.global || data.monthly || data.daily || []);
+            _this.renderChart(data, period);
+            _this.updateTable(data.ip || []);
+            _this.updateSummary(data.global || data.monthly || data.daily || []);
 
             // 修复：使用 classList 代替不存在的 dom.removeClass
             const chartEl = document.getElementById('traffic-chart');
@@ -73,25 +73,25 @@ return view.extend({
 
     // 渲染图表
     renderChart: function(data, period) {
-        const self = this;
+        const _this = this;
         const canvas = document.getElementById('traffic-chart');
         if (!canvas) return;
 
         if (!window.Chart) {
             let script = document.createElement('script');
             script.src = '/luci-static/resources/chart.umd.js';
-            script.onload = () => self._doRender(canvas, data, period);
+            script.onload = () => _this._doRender(canvas, data, period);
             script.onerror = () => {
                 console.error('Failed to load Chart.js');
             };
             document.head.appendChild(script);
         } else {
-            self._doRender(canvas, data, period);
+            _this._doRender(canvas, data, period);
         }
     },
 
     _doRender: function(canvas, data, period) {
-        const self = this;
+        const _this = this;
         // 确保在创建新实例前彻底销毁旧实例
         if (this.chart && typeof this.chart.destroy === 'function') {
             this.chart.destroy();
@@ -211,13 +211,13 @@ return view.extend({
                         },
                         ticks: {
                             callback: function(v) {
-                                return self.formatBytes(v);
+                                return _this.formatBytes(v);
                             }
                         }
                     }
                 },
                 plugins: {
-                    legend: { 
+                    legend: {
                         position: 'top',
                         align: 'end',
                         labels: {
@@ -249,7 +249,7 @@ return view.extend({
                             label: function(context) {
                                 const datasetLabel = context.dataset.label || '';
                                 const value = context.parsed.y || 0;
-                                return '  ' + datasetLabel + ': ' + self.formatBytes(value);
+                                return '  ' + datasetLabel + ': ' + _this.formatBytes(value);
                             },
                             afterBody: function(context) {
                                 // 显示总计
@@ -257,7 +257,7 @@ return view.extend({
                                 context.forEach(function(item) {
                                     total += item.parsed.y || 0;
                                 });
-                                return '\\n总计：' + self.formatBytes(total);
+                                return '\\n总计：' + _this.formatBytes(total);
                             }
                         }
                     }
@@ -324,11 +324,11 @@ return view.extend({
     updateDateInput: function(period) {
         const dateInput = document.getElementById('date-input');
         if (!dateInput) return;
-        
+
         const today = new Date().toISOString().split('T')[0];
         const thisMonth = today.substring(0, 7);
         const thisYear = today.substring(0, 4);
-        
+
         if (period === 'day') {
             dateInput.type = 'date';
             dateInput.value = today;
@@ -344,7 +344,7 @@ return view.extend({
     },
 
     render: function() {
-        const self = this;
+        const _this = this;
         let today = new Date().toISOString().split('T')[0];
         let thisMonth = today.substring(0, 7);
         let thisYear = today.substring(0, 4);
@@ -355,8 +355,8 @@ return view.extend({
                 'id': 'period-select',
                 'class': 'cbi-input-select',
                 'change': (e) => {
-                    self.loadTrafficData();
-                    self.updateDateInput(e.target.value);
+                    _this.loadTrafficData();
+                    _this.updateDateInput(e.target.value);
                 }
             }, [
                 E('option', { 'value': 'day' }, _('Daily View')),
@@ -369,12 +369,12 @@ return view.extend({
                 'type': 'month',
                 'class': 'cbi-input-text',
                 'value': thisMonth,
-                'change': () => self.loadTrafficData()
+                'change': () => _this.loadTrafficData()
             }),
             E('button', {
                 'class': 'cbi-button cbi-button-action',
                 'style': 'margin-left: 10px;',
-                'click': () => self.loadTrafficData()
+                'click': () => _this.loadTrafficData()
             }, _('Refresh'))
         ]);
 
@@ -400,22 +400,21 @@ return view.extend({
         ]);
 
         // 初始加载
-        const self = this;
         this.loadTrafficData().then(() => {
             // 绑定轮询函数
-            self.pollBound = function() {
+            _this.pollBound = function() {
                 // 如果页面已经不存在于 DOM 中，停止轮询
                 if (!document.getElementById('traffic-chart')) {
                     return false;
                 }
-                return self.loadTrafficData();
+                return _this.loadTrafficData();
             };
-            poll.add(self.pollBound, self.pollInterval);
+            poll.add(_this.pollBound, _this.pollInterval);
         });
 
         // 监听页面切换事件，停止轮询
         document.addEventListener('uci:section-change', function() {
-            self.handlePageLeave();
+            _this.handlePageLeave();
         });
 
         return view;
