@@ -1,119 +1,53 @@
-#!/bin/sh
-# /etc/init.d/nikki-traffic - 流量统计采集服务
+#!/bin/sh /etc/rc.common
 
 START=99
-STOP=10
+USE_PROCD=1
 
-ENGINE="/usr/bin/ucode /etc/nikki/ucode/traffic.uc"
-PERSIST_DB="/etc/nikki/traffic.db.bak"
-DB_PATH="/tmp/nikki/traffic.db"
-PID_FILE="/var/run/nikki-traffic.pid"
-LOG_FILE="/tmp/nikki/traffic.log"
+. /etc/nikki/scripts/include.sh
 
-start() {
-    # 检查是否已启用
-    ENABLED=$(uci -q get nikki.traffic.enabled)
-    [ "$ENABLED" != "1" ] && {
-        echo "Nikki traffic statistics disabled"
-        return 1
-    }
-    
-    # 检查是否已在运行
-    if [ -f "$PID_FILE" ]; then
-        OLD_PID=$(cat "$PID_FILE")
-        if kill -0 "$OLD_PID" 2>/dev/null; then
-            echo "Service already running (PID: $OLD_PID)"
-            return 0
+start_service() {
+    local enabled interval
+    config_load nikki
+    config_get_bool enabled "traffic" "enabled" 0
+    config_get interval "traffic" "collect_interval" 30
+
+    # 如果配置为禁用，则停止服务并退出
+    if [ "$enabled" != "1" ]; then
+        procd_kill_instance nikki-traffic 2>/dev/null
+        return 0
+    fi
+
+    # 准备目录
+    mkdir -p /tmp/nikki /var/run
+
+    # 日志轮转（保留最近 1000 行）
+    if [ -f "/tmp/nikki/traffic.log" ]; then
+        local log_size=$(wc -l < /tmp/nikki/traffic.log 2>/dev/null || echo "0")
+        if [ "$log_size" -gt 1000 ]; then
+            tail -n 1000 /tmp/nikki/traffic.log > /tmp/nikki/traffic.log.tmp
+            mv /tmp/nikki/traffic.log.tmp /tmp/nikki/traffic.log
         fi
     fi
-    
-    # 获取采集间隔
-    INTERVAL=$(uci -q get nikki.traffic.collect_interval)
-    INTERVAL=${INTERVAL:-30}
-    
-    # 确保目录存在
-    mkdir -p /tmp/nikki
-    chmod 0700 /tmp/nikki
-    mkdir -p /etc/nikki
-    chmod 0755 /etc/nikki
-    
-    # 启动前尝试从 Flash 恢复数据
-    if [ -f "$PERSIST_DB" ] && [ ! -f "$DB_PATH" ]; then
-        echo "Restoring traffic database from backup..."
-        cp "$PERSIST_DB" "$DB_PATH"
-        chmod 0600 "$DB_PATH"
-    fi
-    
-    # 启动后台采集进程（使用 stdin 重定向避免退出）
-    ( while true; do $ENGINE collect 2>&1; sleep $INTERVAL; done ) </dev/null > "$LOG_FILE" 2>&1 &
-    
-    # 保存 PID
-    echo $! > "$PID_FILE"
-    
-    echo "Traffic collection started (interval: ${INTERVAL}s, PID: $(cat $PID_FILE))"
+
+    # 启动采集进程（使用 procd respawn 管理）
+    procd_open_instance nikki-traffic
+    procd_set_param command /bin/sh /etc/nikki/scripts/traffic-collect.sh "$interval"
+    procd_set_param respawn
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param pidfile /var/run/nikki-traffic.pid
+    procd_close_instance
 }
 
-stop() {
-    if [ -f "$PID_FILE" ]; then
-        PID=$(cat "$PID_FILE")
-        if kill -0 "$PID" 2>/dev/null; then
-            echo "Stopping traffic collection (PID: $PID)..."
-            kill "$PID"
-            rm -f "$PID_FILE"
-            
-            # 执行最终备份
-            echo "Backing up traffic database..."
-            $ENGINE persist 2>&1
-        else
-            echo "Process not running"
-            rm -f "$PID_FILE"
-        fi
-    else
-        echo "Service not running"
-    fi
-}
-
-restart() {
+# 处理配置修改触发的重载
+reload_service() {
+    # 重新读取配置并重启服务
     stop
-    sleep 1
     start
 }
 
-status() {
-    ENABLED=$(uci -q get nikki.traffic.enabled)
-    
-    if [ "$ENABLED" = "1" ]; then
-        if [ -f "$PID_FILE" ] && kill -0 $(cat "$PID_FILE") 2>/dev/null; then
-            echo "Traffic statistics is ENABLED and RUNNING (PID: $(cat $PID_FILE))"
-            return 0
-        else
-            echo "Traffic statistics is ENABLED but NOT RUNNING"
-            return 1
-        fi
-    else
-        echo "Traffic statistics is DISABLED"
-        return 1
-    fi
+service_triggers() {
+    # 监听 nikki 的 uci 配置变化
+    # 当 nikki 配置 reload 时，此服务也会自动 reload
+    procd_add_reload_trigger "nikki"
 }
-
-# 主逻辑
-case "$1" in
-    start)
-        start
-        ;;
-    stop)
-        stop
-        ;;
-    restart)
-        restart
-        ;;
-    status)
-        status
-        ;;
-    *)
-        echo "Usage: $0 {start|stop|restart|status}"
-        exit 1
-        ;;
-esac
-
-exit 0
