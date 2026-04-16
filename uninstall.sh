@@ -14,14 +14,42 @@ echo "[1/5] 停止服务..."
 # 卸载软件包
 echo "[2/5] 卸载软件包..."
 if [ -x "/bin/opkg" ]; then
-    opkg list-installed luci-i18n-nikki-* | cut -d ' ' -f 1 | xargs opkg remove 2>/dev/null
-    opkg remove luci-app-nikki 2>/dev/null
-    opkg remove nikki 2>/dev/null
+    # 检查并卸载语言包
+    INSTALLED_I18N=$(opkg list-installed 2>/dev/null | grep "^luci-i18n-nikki" | cut -d ' ' -f 1)
+    if [ -n "$INSTALLED_I18N" ]; then
+        echo "    卸载语言包：$INSTALLED_I18N"
+        opkg remove $INSTALLED_I18N 2>/dev/null
+    fi
+    
+    # 卸载主程序
+    if opkg list-installed | grep -q "^luci-app-nikki"; then
+        echo "    卸载 luci-app-nikki..."
+        opkg remove luci-app-nikki 2>/dev/null
+    fi
+    
+    if opkg list-installed | grep -q "^nikki"; then
+        echo "    卸载 nikki..."
+        opkg remove nikki 2>/dev/null
+    fi
+    
 elif [ -x "/usr/bin/apk" ]; then
-    apk list --installed --manifest luci-i18n-nikki-* | cut -d ' ' -f 1 | xargs apk del 2>/dev/null
-    apk del luci-app-nikki 2>/dev/null
-    apk del nikki 2>/dev/null
+    # APK 包管理器
+    if apk list --installed 2>/dev/null | grep -q "luci-i18n-nikki"; then
+        echo "    卸载语言包..."
+        apk del luci-i18n-nikki-* 2>/dev/null
+    fi
+    
+    if apk list --installed 2>/dev/null | grep -q "luci-app-nikki"; then
+        echo "    卸载 luci-app-nikki..."
+        apk del luci-app-nikki 2>/dev/null
+    fi
+    
+    if apk list --installed 2>/dev/null | grep -q "nikki"; then
+        echo "    卸载 nikki..."
+        apk del nikki 2>/dev/null
+    fi
 fi
+echo "    完成"
 
 # 删除配置文件
 echo "[3/5] 删除配置文件..."
