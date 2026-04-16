@@ -47,18 +47,32 @@ return view.extend({
         let period = document.getElementById('period-select')?.value || 'day';
         this.currentPeriod = period;
 
-        // 使用 currentDate 变量，不依赖输入框
-        let date = this.currentDate;
-        if (!date) {
-            // 首次加载时初始化日期
-            const today = new Date().toISOString().split('T')[0];
-            const thisMonth = today.substring(0, 7);
-            const thisYear = today.substring(0, 4);
-            if (period === 'year') date = thisYear;
-            else if (period === 'month') date = thisMonth;
-            else date = today;
-            this.currentDate = date;
+        // 使用本地时区日期，避免 UTC 时区问题
+        const now = new Date();
+        const today = now.getFullYear() + '-' + 
+                      String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+                      String(now.getDate()).padStart(2, '0');
+        const thisMonth = today.substring(0, 7);
+        const thisYear = today.substring(0, 4);
+        
+        let date;
+        if (period === 'year') {
+            date = thisYear;
+        } else if (period === 'month') {
+            date = thisMonth;
+        } else {
+            date = today;  // 日视图始终使用今天
         }
+        
+        this.currentDate = date;
+        
+        // 立即同步更新输入框的值（在浏览器恢复缓存之前）
+        setTimeout(() => {
+            let dateInput = document.getElementById('date-input');
+            if (dateInput && period === 'day') {
+                dateInput.value = today;
+            }
+        }, 0);
 
         console.log('[Traffic] Request params: period=' + period + ', date=' + date);
 
@@ -453,7 +467,11 @@ return view.extend({
         const dateInput = document.getElementById('date-input');
         if (!dateInput) return;
 
-        const today = new Date().toISOString().split('T')[0];
+        // 使用本地时区日期
+        const now = new Date();
+        const today = now.getFullYear() + '-' + 
+                      String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+                      String(now.getDate()).padStart(2, '0');
         const thisMonth = today.substring(0, 7);
         const thisYear = today.substring(0, 4);
 
@@ -483,9 +501,17 @@ return view.extend({
 
     render: function() {
         const _this = this;
-        let today = new Date().toISOString().split('T')[0];
-        let thisMonth = today.substring(0, 7);
-        let thisYear = today.substring(0, 4);
+            
+        // 使用本地时区日期，避免 UTC 时区问题
+        const now = new Date();
+        const today = now.getFullYear() + '-' + 
+                      String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+                      String(now.getDate()).padStart(2, '0');
+        const thisMonth = today.substring(0, 7);
+        const thisYear = today.substring(0, 4);
+            
+        // 初始化 currentDate 为今天（日视图）
+        this.currentDate = today;
 
         let controls = E('div', { 'style': 'margin-bottom: 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;' }, [
             E('label', { 'style': 'font-weight: bold;' }, _('Period') + ': '),
@@ -496,8 +522,11 @@ return view.extend({
                     let newPeriod = e.target.value;
                     console.log('[Traffic] Period changed to: ' + newPeriod);
                     
-                    // 更新日期
-                    const today = new Date().toISOString().split('T')[0];
+                    // 更新日期 - 使用本地时区
+                    const now = new Date();
+                    const today = now.getFullYear() + '-' + 
+                                  String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+                                  String(now.getDate()).padStart(2, '0');
                     const thisMonth = today.substring(0, 7);
                     const thisYear = today.substring(0, 4);
                     
@@ -516,9 +545,10 @@ return view.extend({
             E('label', { 'style': 'font-weight: bold; margin-left: 10px;' }, _('Date') + ': '),
             E('input', {
                 'id': 'date-input',
-                'type': 'month',
+                'type': 'date',  // 默认是日视图，所以使用 date 类型
                 'class': 'cbi-input-text',
-                'value': thisMonth,
+                'value': today,  // 使用今天的日期
+                'autocomplete': 'off',  // 禁用浏览器自动填充
                 'change': () => {
                     console.log('[Traffic] Date input changed');
                     let dateInput = document.getElementById('date-input');
