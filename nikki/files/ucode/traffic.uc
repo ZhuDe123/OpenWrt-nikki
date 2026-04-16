@@ -14,11 +14,10 @@ const API_SECRET = uci.get('nikki', 'mixin', 'api_secret') || '';
 // ========== 工具函数 ==========
 
 function log(msg) {
-    let t = popen("date '+%Y-%m-%d %H:%M:%S'");
-    let timestamp = t ? trim(t.read('all')) : '';
-    if (t) t.close();
     // 只在出错时才输出日志，减少日志量
     if (match(msg, /Error|Warning|Fail/)) {
+        let t = localtime(time());
+        let timestamp = sprintf('%d-%02d-%02d %02d:%02d:%02d', t.year, t.mon, t.mday, t.hour, t.min, t.sec);
         print(sprintf("[%s] [Traffic] %s\n", timestamp, msg));
     }
 }
@@ -36,40 +35,32 @@ function get_api_url(path) {
 function init_db() {
     if (!stat('/tmp/nikki')) mkdir('/tmp/nikki', 0700);
 
-    // 检查数据库是否需要初始化（文件不存在或没有表）
-    let need_init = false;
-    if (!stat(DB_PATH)) {
-        need_init = true;
-    } else {
-        // 检查表是否存在
-        let check_p = popen(sprintf("sqlite3 %s '.tables' 2>/dev/null", shell_quote(DB_PATH)));
-        if (check_p) {
-            let tables = check_p.read('all') || '';
-            check_p.close();
-            if (!match(tables, /traffic_daily/) || !match(tables, /traffic_ip_daily/)) {
-                need_init = true;
-            }
-        } else {
-            need_init = true;
-        }
+    // 使用标记文件避免每次采集都检查表结构
+    let init_flag = '/tmp/nikki/traffic.db.init';
+    if (stat(init_flag)) return;  // 已初始化，直接返回
+
+    // 数据库不存在或首次初始化
+    popen(sprintf("sqlite3 %s 'PRAGMA journal_mode=WAL;'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_daily (date TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_monthly (month TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_yearly (year TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_ip_daily (date TEXT, ip TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, ip));'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_minute (date TEXT, time TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, time));'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_ip_date ON traffic_ip_daily(date);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_daily_date ON traffic_daily(date);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_monthly_month ON traffic_monthly(month);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_yearly_year ON traffic_yearly(year);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_minute_date ON traffic_minute(date, time);'", shell_quote(DB_PATH)))?.close();
+    chmod(DB_PATH, 0600);
+
+    // 创建标记文件
+    let flag = open(init_flag, 'w');
+    if (flag) {
+        flag.write('1');
+        flag.close();
     }
-    
-    if (need_init) {
-        // 单条执行 SQL 语句
-        popen(sprintf("sqlite3 %s 'PRAGMA journal_mode=WAL;'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_daily (date TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_monthly (month TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_yearly (year TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_ip_daily (date TEXT, ip TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, ip));'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_minute (date TEXT, time TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, time));'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_ip_date ON traffic_ip_daily(date);'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_daily_date ON traffic_daily(date);'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_monthly_month ON traffic_monthly(month);'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_yearly_year ON traffic_yearly(year);'", shell_quote(DB_PATH)))?.close();
-        popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_minute_date ON traffic_minute(date, time);'", shell_quote(DB_PATH)))?.close();
-        chmod(DB_PATH, 0600);
-        log("Database initialized");
-    }
+
+    log("Database initialized");
 }
 
 // ========== 数据采集（带锁） ==========
@@ -77,63 +68,65 @@ function init_db() {
 function collect_traffic() {
     init_db();
 
-    // 检查是否已有采集在运行（防止并发）
+    // 检查是否已有采集在运行（使用 PID 验证，避免残留锁文件）
     let lock_file = '/tmp/nikki/traffic.lock';
     if (stat(lock_file)) {
-        log("Warning: Another collection is running, skipping");
-        return;
-    }
-
-    // 创建锁文件
-    let lock = open(lock_file, 'w');
-    if (lock) {
-        lock.write(time());
-        lock.close();
-    }
-    
-    // 定义释放锁的函数
-    function release_lock() {
-        if (stat(lock_file)) {
+        let lock_p = open(lock_file, 'r');
+        if (lock_p) {
+            let lock_pid = trim(lock_p.read('all') || '');
+            lock_p.close();
+            // 检查进程是否仍在运行
+            if (lock_pid && stat('/proc/' + lock_pid)) {
+                log("Warning: Another collection is running (PID " + lock_pid + "), skipping");
+                return;
+            }
+            // 进程已不存在，清理残留锁文件
             system("rm -f " + lock_file);
         }
     }
 
+    // 创建锁文件（写入当前进程 PID）
+    let my_pid = popen("cat /proc/self/stat 2>/dev/null | cut -d' ' -f1");
+    let pid_str = my_pid ? trim(my_pid.read('all')) : '';
+    if (my_pid) my_pid.close();
+
+    let lock = open(lock_file, 'w');
+    if (lock) {
+        lock.write(pid_str || '0');
+        lock.close();
+    }
+
+    // 定义释放锁的函数
+    function release_lock() {
+        system("rm -f " + lock_file);
+    }
+
     try {
-        // 1. 获取全局总量（非流式 API）
-        let p1 = popen(get_api_url("/traffic/latest"));
-        let traffic_res = p1 ? p1.read('all') : '{}';
+        // 1. 获取全局总量 + IP 统计（单次 API 调用，替代原来的 3 次）
+        let p1 = popen(get_api_url("/traffic/summary"));
+        let summary_res = p1 ? p1.read('all') : '{}';
         if (p1) p1.close();
 
-        let traffic_data = {};
-        if (traffic_res && match(traffic_res, /^\s*\{/)) {
-            traffic_data = json(traffic_res) || {};
+        let summary_data = {};
+        if (summary_res && match(summary_res, /^\s*\{/)) {
+            summary_data = json(summary_res) || {};
         }
 
-        if (!traffic_data || !traffic_data.upTotal) {
-            log("Warning: Cannot get traffic data");
+        if (!summary_data || !summary_data.upTotal) {
+            log("Warning: Cannot get traffic data from /traffic/summary");
             release_lock();
             return;
         }
 
-        let up_total = traffic_data.upTotal || 0;
-        let down_total = traffic_data.downTotal || 0;
+        let up_total = summary_data.upTotal || 0;
+        let down_total = summary_data.downTotal || 0;
 
-        // 2. 获取活跃连接的 IP 统计（使用新的聚合 API，无需限制 50KB）
+        // 2. 解析 IP 统计数据（summary 接口已包含所有 IP）
         let ip_stats = {};
-        let p2 = popen(get_api_url("/traffic/ip"));
-        let ip_res = p2 ? p2.read('all') : '{}';
-        if (p2) p2.close();
-
-        // 解析 IP 统计数据
-        let ip_data = {};
-        if (ip_res && match(ip_res, /^\s*\{/)) {
-            ip_data = json(ip_res) || {};
-        }
-
-        if (ip_data.ipStats) {
-            for (let ip_stat in ip_data.ipStats) {
+        if (summary_data.ipStats) {
+            for (let ip_stat in summary_data.ipStats) {
                 let ip = ip_stat.ip;
-                if (ip != 'unknown' && ip != 'invalid IP') {
+                if (ip && ip != 'unknown' && ip != 'invalid IP') {
                     if (!ip_stats[ip]) ip_stats[ip] = {up: 0, down: 0};
                     ip_stats[ip].up += (ip_stat.upload || 0);
                     ip_stats[ip].down += (ip_stat.download || 0);
@@ -141,83 +134,57 @@ function collect_traffic() {
             }
         }
 
-        // 3. 获取已关闭连接的 IP 统计
-        let p3 = popen(get_api_url("/traffic/closed"));
-        let closed_res = p3 ? p3.read('all') : '{}';
-        if (p3) p3.close();
-
-        let closed_data = {};
-        if (closed_res && match(closed_res, /^\s*\{/)) {
-            closed_data = json(closed_res) || {};
-        }
-
-        if (closed_data.closedConnections) {
-            for (let closed in closed_data.closedConnections) {
-                let ip = closed.sourceIP;
-                if (ip != 'unknown' && ip != 'invalid IP') {
-                    if (!ip_stats[ip]) ip_stats[ip] = {up: 0, down: 0};
-                    ip_stats[ip].up += (closed.upload || 0);
-                    ip_stats[ip].down += (closed.download || 0);
-                }
-            }
-        }
-
-        // 4. 写入数据库
+        // 4. 写入数据库（使用事务合并所有写入，减少进程启动开销）
         let now = time();
-        let today_p = popen("date +%Y-%m-%d");
-        let today_str = today_p ? trim(today_p.read('all')) : '';
-        if (today_p) today_p.close();
 
-        let month_p = popen("date +%Y-%m");
-        let month_str = month_p ? trim(month_p.read('all')) : '';
-        if (month_p) month_p.close();
-        
-        let time_p = popen("date +%H:%M");
-        let time_str = time_p ? trim(time_p.read('all')) : '';
-        if (time_p) time_p.close();
+        // 使用 localtime 内置函数替代 popen("date")，减少子进程开销
+        let t = localtime(now);
+        let today_str = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday);
+        let month_str = sprintf('%d-%02d', t.year, t.mon);
+        let time_str = sprintf('%02d:%02d', t.hour, t.min);
+        let year_str = sprintf('%d', t.year);
 
-        // 写入全局总量（日）
-        let sql_daily = sprintf(
-            "INSERT INTO traffic_daily VALUES ('%s', %d, %d, %d) ON CONFLICT(date) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;",
+        // 构建批量 SQL 事务
+        let sql_batch = "BEGIN TRANSACTION;\n";
+
+        // 全局总量（日）
+        sql_batch += sprintf(
+            "INSERT INTO traffic_daily VALUES ('%s', %d, %d, %d) ON CONFLICT(date) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
             today_str, up_total, down_total, now, up_total, down_total, now
         );
-        let p4 = popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_daily)));
-        if (p4) p4.close();
 
-        // 写入全局总量（月）
-        let sql_monthly = sprintf(
-            "INSERT INTO traffic_monthly VALUES ('%s', %d, %d, %d) ON CONFLICT(month) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;",
+        // 全局总量（月）
+        sql_batch += sprintf(
+            "INSERT INTO traffic_monthly VALUES ('%s', %d, %d, %d) ON CONFLICT(month) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
             month_str, up_total, down_total, now, up_total, down_total, now
         );
-        let p5 = popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_monthly)));
-        if (p5) p5.close();
-        
-        // 写入年度总量
-        let year_str = substr(month_str, 0, 4);
-        let sql_yearly = sprintf(
-            "INSERT INTO traffic_yearly VALUES ('%s', %d, %d, %d) ON CONFLICT(year) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;",
+
+        // 年度总量
+        sql_batch += sprintf(
+            "INSERT INTO traffic_yearly VALUES ('%s', %d, %d, %d) ON CONFLICT(year) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
             year_str, up_total, down_total, now, up_total, down_total, now
         );
-        let p_year = popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_yearly)));
-        if (p_year) p_year.close();
-        
-        // 写入分钟级数据
-        let sql_minute = sprintf(
-            "INSERT INTO traffic_minute VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, time) DO UPDATE SET upload=%d, download=%d;",
+
+        // 分钟级数据
+        sql_batch += sprintf(
+            "INSERT INTO traffic_minute VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, time) DO UPDATE SET upload=%d, download=%d;\n",
             today_str, time_str, up_total, down_total, up_total, down_total
         );
-        let p6 = popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_minute)));
-        if (p6) p6.close();
 
-        // 写入 IP 统计
+        // IP 统计（批量写入）
         for (let ip, s in ip_stats) {
-            let sql_ip = sprintf(
-                "INSERT INTO traffic_ip_daily VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, ip) DO UPDATE SET upload=upload+%d, download=download+%d;",
+            sql_batch += sprintf(
+                "INSERT INTO traffic_ip_daily VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, ip) DO UPDATE SET upload=upload+%d, download=download+%d;\n",
                 today_str, ip, s.up, s.down, s.up, s.down
             );
-            let p6 = popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_ip)));
-            if (p6) p6.close();
         }
+
+        sql_batch += "COMMIT;\n";
+
+        // 单次 sqlite3 进程执行所有写入
+        let sql_cmd = sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_batch));
+        let p_write = popen(sql_cmd);
+        if (p_write) p_write.close();
 
         log(sprintf("Collected: Total(up=%d, down=%d), IPs=%d", up_total, down_total, length(ip_stats)));
 
@@ -233,23 +200,22 @@ function collect_traffic() {
     // 如果超过 24 小时，执行清理
     if ((now_ts - last_cleanup) > 86400) {
         let retain_days = int(uci.get('nikki', 'traffic', 'retain_days') || 30);
-        
-        // 直接执行清理逻辑（不使用 cleanup 函数）
-        let sql_daily = sprintf("DELETE FROM traffic_daily WHERE date < date('now', '-%d days');", retain_days);
-        popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_daily)))?.close();
-        
-        let sql_monthly = sprintf("DELETE FROM traffic_monthly WHERE month < strftime('%%Y-%%m', date('now', '-%d months'));", retain_days);
-        popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_monthly)))?.close();
-        
-        let sql_ip = sprintf("DELETE FROM traffic_ip_daily WHERE date < date('now', '-%d days');", retain_days);
-        popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_ip)))?.close();
-        
-        let sql_minute = sprintf("DELETE FROM traffic_minute WHERE date < date('now', '-1 day');");
-        popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_minute)))?.close();
-        
+
+        // 合并清理 SQL 为单个事务（只启动 1 个 sqlite3 进程）
+        let cleanup_sql = sprintf(
+            "BEGIN TRANSACTION;" +
+            "DELETE FROM traffic_daily WHERE date < date('now', '-%d days');" +
+            "DELETE FROM traffic_monthly WHERE month < strftime('%%Y-%%m', date('now', '-%d months'));" +
+            "DELETE FROM traffic_ip_daily WHERE date < date('now', '-%d days');" +
+            "DELETE FROM traffic_minute WHERE date < date('now', '-1 day');" +
+            "COMMIT;",
+            retain_days, retain_days, retain_days
+        );
+        popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(cleanup_sql)))?.close();
+
         uci.set('nikki', 'traffic', 'last_cleanup', sprintf('%d', now_ts));
         uci.commit('nikki');
-        
+
         log("Cleaned up data older than " + retain_days + " days");
     }
     
@@ -278,27 +244,26 @@ function persist() {
 
 function query_stats(period, date_val, view_type) {
     if (!date_val) {
-        // 使用 popen 获取当前日期
-        let date_p = popen("date +%Y-%m-%d");
-        let today = date_p ? trim(date_p.read('all')) : '';
-        if (date_p) date_p.close();
-        
+        // 使用 localtime 内置函数替代 popen("date")
+        let t = localtime(time());
+        let today = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday);
+        let month = sprintf('%d-%02d', t.year, t.mon);
+        let year = sprintf('%d', t.year);
+
         if (period == 'year') {
-            date_val = strftime('%Y', time()) || popen("date +%Y")?.read('all') || '';
+            date_val = year;
         } else if (period == 'month') {
-            let month_p = popen("date +%Y-%m");
-            date_val = month_p ? trim(month_p.read('all')) : '';
-            if (month_p) month_p.close();
+            date_val = month;
         } else {
             date_val = today;
         }
     }
-    
+
     // 获取当前时间用于过滤
     let now_time = '';
     if (period == 'day') {
-        now_time = popen("date +%H:%M")?.read('all') || '00:00';
-        now_time = trim(now_time);
+        let t = localtime(time());
+        now_time = sprintf('%02d:%02d', t.hour, t.min);
     }
 
     // 使用 shell 直接执行 sqlite3 并返回 JSON
@@ -406,7 +371,8 @@ function query_history(days) {
     if (p2) { res.monthly = json(p2.read('all')) || []; p2.close(); }
     
     // 今日 Top IP
-    let today = strftime('%Y-%m-%d', time());
+    let t = localtime(time());
+    let today = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday);
     let p3 = popen(db_cmd + shell_quote(sprintf(
         "SELECT ip, upload, download FROM traffic_ip_daily WHERE date = '%s' ORDER BY (upload+download) DESC LIMIT 10;", today
     )));
@@ -420,34 +386,20 @@ function query_history(days) {
 function cleanup(retain_days) {
     if (!retain_days) retain_days = 30;
 
-    let today = strftime('%Y-%m-%d', time());
-    let current_month = strftime('%Y-%m', time());
-    let current_year = strftime('%Y', time());
-    
-    // 清理旧的日统计数据
-    let sql_daily = sprintf("DELETE FROM traffic_daily WHERE date < date('now', '-%d days');", retain_days);
-    popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_daily)))?.close();
-    
-    // 清理旧的月统计数据（保留 retain_days 个月）
-    let sql_monthly = sprintf("DELETE FROM traffic_monthly WHERE month < strftime('%%Y-%%m', date('now', '-%d months'));", retain_days);
-    popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_monthly)))?.close();
-    
-    // 清理旧的年统计数据（保留 retain_days 年）
-    let sql_yearly = sprintf("DELETE FROM traffic_yearly WHERE year < strftime('%%Y', date('now', '-%d years'));", retain_days);
-    popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_yearly)))?.close();
-    
-    // 清理旧的 IP 统计数据
-    let sql_ip = sprintf("DELETE FROM traffic_ip_daily WHERE date < date('now', '-%d days');", retain_days);
-    popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_ip)))?.close();
-    
-    // 清理旧的分钟数据（只保留当天）
-    let sql_minute = sprintf("DELETE FROM traffic_minute WHERE date < date('now', '-1 day');");
-    popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_minute)))?.close();
-    
-    // 清理孤立的分钟数据（不属于当天的）
-    let sql_minute_orphan = sprintf("DELETE FROM traffic_minute WHERE date != date('now');");
-    popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql_minute_orphan)))?.close();
-    
+    // 合并所有清理 SQL 为单个事务（只启动 1 个 sqlite3 进程）
+    let cleanup_sql = sprintf(
+        "BEGIN TRANSACTION;" +
+        "DELETE FROM traffic_daily WHERE date < date('now', '-%d days');" +
+        "DELETE FROM traffic_monthly WHERE month < strftime('%%Y-%%m', date('now', '-%d months'));" +
+        "DELETE FROM traffic_yearly WHERE year < strftime('%%Y', date('now', '-%d years'));" +
+        "DELETE FROM traffic_ip_daily WHERE date < date('now', '-%d days');" +
+        "DELETE FROM traffic_minute WHERE date < date('now', '-1 day');" +
+        "DELETE FROM traffic_minute WHERE date != date('now');" +
+        "COMMIT;",
+        retain_days, retain_days, retain_days, retain_days
+    );
+    popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(cleanup_sql)))?.close();
+
     log(sprintf("Cleaned up data older than %d days", retain_days));
 }
 

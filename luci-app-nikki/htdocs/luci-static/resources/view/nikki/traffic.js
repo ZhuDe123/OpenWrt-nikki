@@ -7,8 +7,22 @@
 
 return view.extend({
     chart: null,
-    pollInterval: 5000,  // 5 秒刷新一次
+    pollInterval: 30000,  // 30 秒刷新一次（与采集间隔一致）
     currentPeriod: 'day',  // 当前视图类型：day/month/year
+    pollBound: null,  // 保存轮询函数引用，用于页面卸载时清理
+
+    // 页面卸载时停止轮询
+    handlePageLeave: function() {
+        if (this.pollBound) {
+            poll.remove(this.pollBound);
+            this.pollBound = null;
+        }
+        // 销毁图表
+        if (this.chart && typeof this.chart.destroy === 'function') {
+            this.chart.destroy();
+            this.chart = null;
+        }
+    },
 
     // 字节单位转换
     formatBytes: function(bytes) {
@@ -386,15 +400,22 @@ return view.extend({
         ]);
 
         // 初始加载
+        const self = this;
         this.loadTrafficData().then(() => {
-            // 启动轮询，检查页面是否存在
-            poll.add(() => {
+            // 绑定轮询函数
+            self.pollBound = function() {
                 // 如果页面已经不存在于 DOM 中，停止轮询
                 if (!document.getElementById('traffic-chart')) {
                     return false;
                 }
-                return this.loadTrafficData();
-            }, this.pollInterval);
+                return self.loadTrafficData();
+            };
+            poll.add(self.pollBound, self.pollInterval);
+        });
+
+        // 监听页面切换事件，停止轮询
+        document.addEventListener('uci:section-change', function() {
+            self.handlePageLeave();
         });
 
         return view;
