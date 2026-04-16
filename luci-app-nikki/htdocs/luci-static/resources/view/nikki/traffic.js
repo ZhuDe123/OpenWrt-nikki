@@ -9,11 +9,13 @@ return view.extend({
     chart: null,
     pollInterval: 30000,  // 30 秒刷新一次（与采集间隔一致）
     currentPeriod: 'day',  // 当前视图类型：day/month/year
+    currentDate: '',  // 当前选中的日期（不依赖输入框）
     pollBound: null,  // 保存轮询函数引用，用于页面卸载时清理
     ipTableData: [],  // 保存所有 IP 数据
     currentPage: 1,  // 当前页码
     pageSize: 10,  // 每页显示 10 条
     searchTerm: '',  // 搜索关键词
+    ipFilter: 'all',  // IP 过滤：all/ipv4/ipv6
 
     // 页面卸载时停止轮询
     handlePageLeave: function() {
@@ -45,37 +47,17 @@ return view.extend({
         let period = document.getElementById('period-select')?.value || 'day';
         this.currentPeriod = period;
 
-        let date = '';
-        const dateInput = document.getElementById('date-input');
-        
-        // 调试：打印日期输入框的当前值
-        let inputValue = dateInput ? dateInput.value : 'NULL';
-        let inputType = dateInput ? dateInput.type : 'NULL';
-        console.log('[Traffic] Date input: type=' + inputType + ', value=' + inputValue);
-        
-        // 优先从日期输入框获取值
-        if (dateInput && dateInput.value && dateInput.value.trim()) {
-            date = dateInput.value.trim();
-        } else {
-            // 如果输入框为空，根据视图类型生成默认日期
+        // 使用 currentDate 变量，不依赖输入框
+        let date = this.currentDate;
+        if (!date) {
+            // 首次加载时初始化日期
             const today = new Date().toISOString().split('T')[0];
             const thisMonth = today.substring(0, 7);
             const thisYear = today.substring(0, 4);
             if (period === 'year') date = thisYear;
             else if (period === 'month') date = thisMonth;
             else date = today;
-            console.log('[Traffic] Using default date: ' + date);
-        }
-        
-        // 日视图需要完整日期格式 (YYYY-MM-DD)
-        if (period === 'day') {
-            if (date.length === 7 && date.match(/^\d{4}-\d{2}$/)) {
-                console.log('[Traffic] Warning: Month format detected, converting to day format');
-                date = date + '-01';
-            } else if (date.length === 4 && date.match(/^\d{4}$/)) {
-                console.log('[Traffic] Warning: Year format detected, converting to day format');
-                date = date + '-01-01';
-            }
+            this.currentDate = date;
         }
 
         console.log('[Traffic] Request params: period=' + period + ', date=' + date);
@@ -92,7 +74,7 @@ return view.extend({
         }).then(function(data) {
             console.log('[Traffic] Response data:', data);
             _this.renderChart(data, period);
-            _this.updateTable(data.ip || []);  // 更新表格（自动使用当前搜索词和分页）
+            _this.updateTable(data.ip || []);  // 更新表格（自动使用当前搜索词和过滤）
             _this.updateSummary(data.global || data.monthly || data.daily || []);
 
             const chartEl = document.getElementById('traffic-chart');
@@ -308,7 +290,7 @@ return view.extend({
         });
     },
 
-    // 更新 IP 表格（支持搜索和分页）
+    // 更新 IP 表格（支持搜索、分页、IPv4/IPv6 过滤、倒序排序）
     updateTable: function(ipData) {
         let _this = this;
         let tbody = document.getElementById('ip-table-body');
@@ -323,7 +305,7 @@ return view.extend({
         }
         this.ipTableData = ipArray;
 
-        // 过滤数据（支持模糊搜索）
+        // 1. 过滤数据（支持模糊搜索）
         let filteredArray = ipArray;
         if (this.searchTerm && this.searchTerm.trim()) {
             let term = this.searchTerm.toLowerCase().trim();
@@ -334,7 +316,29 @@ return view.extend({
             console.log('[Traffic] Search filter: "' + term + '", found ' + filteredArray.length + ' of ' + ipArray.length);
         }
 
-        // 计算分页
+        // 2. IPv4/IPv6 过滤
+        if (this.ipFilter === 'ipv4') {
+            filteredArray = filteredArray.filter(row => {
+                let ip = row.ip || row.ip_address || '';
+                return ip.includes(':') === false;  // 不含冒号的是 IPv4
+            });
+            console.log('[Traffic] IPv4 filter: ' + filteredArray.length + ' of ' + ipArray.length);
+        } else if (this.ipFilter === 'ipv6') {
+            filteredArray = filteredArray.filter(row => {
+                let ip = row.ip || row.ip_address || '';
+                return ip.includes(':') === true;  // 含冒号的是 IPv6
+            });
+            console.log('[Traffic] IPv6 filter: ' + filteredArray.length + ' of ' + ipArray.length);
+        }
+
+        // 3. 按总量倒序排序
+        filteredArray.sort((a, b) => {
+            let totalA = (a.upload || 0) + (a.download || 0);
+            let totalB = (b.upload || 0) + (b.download || 0);
+            return totalB - totalA;  // 倒序
+        });
+
+        // 4. 计算分页
         let totalPages = Math.ceil(filteredArray.length / this.pageSize);
         if (this.currentPage > totalPages) this.currentPage = Math.max(1, totalPages);
         if (this.currentPage < 1) this.currentPage = 1;
@@ -350,7 +354,7 @@ return view.extend({
         if (!pageData || pageData.length === 0) {
             tbody.appendChild(E('tr', { 'class': 'tr' }, [
                 E('td', { 'class': 'td', 'colspan': '4' }, 
-                    this.searchTerm ? _('No matching IP found') : _('No data available'))
+                    this.searchTerm || this.ipFilter !== 'all' ? _('No matching IP found') : _('No data available'))
             ]));
         } else {
             pageData.forEach(row => {
@@ -444,7 +448,7 @@ return view.extend({
             '<div class="cbi-value-field">' + this.formatBytes(download) + '</div></div>';
     },
 
-    // 更新日期输入框类型
+    // 更新日期输入框类型（仅用于显示，不影响 currentDate）
     updateDateInput: function(period) {
         const dateInput = document.getElementById('date-input');
         if (!dateInput) return;
@@ -457,37 +461,24 @@ return view.extend({
 
         if (period === 'day') {
             dateInput.type = 'date';
-            dateInput.value = today;
-            console.log('[Traffic] Day input set to: ' + today);
+            dateInput.value = this.currentDate || today;
+            console.log('[Traffic] Day input set to: ' + dateInput.value);
         } else if (period === 'month') {
             dateInput.type = 'month';
-            dateInput.value = thisMonth;
-            console.log('[Traffic] Month input set to: ' + thisMonth);
+            dateInput.value = this.currentDate || thisMonth;
+            console.log('[Traffic] Month input set to: ' + dateInput.value);
         } else if (period === 'year') {
             dateInput.type = 'number';
             dateInput.min = '2020';
             dateInput.max = '2030';
-            dateInput.value = thisYear;
-            console.log('[Traffic] Year input set to: ' + thisYear);
+            dateInput.value = this.currentDate || thisYear;
+            console.log('[Traffic] Year input set to: ' + dateInput.value);
         }
     },
 
-    // 获取当前日期（根据当前视图类型）
-    getCurrentDate: function() {
-        let period = document.getElementById('period-select')?.value || 'day';
-        const dateInput = document.getElementById('date-input');
-        
-        if (dateInput && dateInput.value && dateInput.value.trim()) {
-            return dateInput.value.trim();
-        }
-        
-        const today = new Date().toISOString().split('T')[0];
-        const thisMonth = today.substring(0, 7);
-        const thisYear = today.substring(0, 4);
-        
-        if (period === 'year') return thisYear;
-        if (period === 'month') return thisMonth;
-        return today;
+    // 设置日期（切换视图时调用）
+    setCurrentDate: function(date) {
+        this.currentDate = date;
     },
 
     render: function() {
@@ -504,6 +495,16 @@ return view.extend({
                 'change': (e) => {
                     let newPeriod = e.target.value;
                     console.log('[Traffic] Period changed to: ' + newPeriod);
+                    
+                    // 更新日期
+                    const today = new Date().toISOString().split('T')[0];
+                    const thisMonth = today.substring(0, 7);
+                    const thisYear = today.substring(0, 4);
+                    
+                    if (newPeriod === 'year') _this.setCurrentDate(thisYear);
+                    else if (newPeriod === 'month') _this.setCurrentDate(thisMonth);
+                    else _this.setCurrentDate(today);
+                    
                     _this.updateDateInput(newPeriod);
                     _this.loadTrafficData();
                 }
@@ -520,7 +521,11 @@ return view.extend({
                 'value': thisMonth,
                 'change': () => {
                     console.log('[Traffic] Date input changed');
-                    _this.loadTrafficData();
+                    let dateInput = document.getElementById('date-input');
+                    if (dateInput && dateInput.value) {
+                        _this.setCurrentDate(dateInput.value);
+                        _this.loadTrafficData();
+                    }
                 }
             }),
             E('button', {
@@ -538,18 +543,34 @@ return view.extend({
                 E('canvas', { 'id': 'traffic-chart' })
             ]),
             E('div', { 'class': 'cbi-section' }, [
-                E('div', { 'style': 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;' }, [
+                E('div', { 'style': 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;' }, [
                     E('h3', { 'id': 'ip-table-title' }, _('Top IP Traffic')),
-                    E('input', {
-                        'id': 'ip-search-input',
-                        'type': 'text',
-                        'class': 'cbi-input-text',
-                        'placeholder': _('Search IP...'),
-                        'style': 'width: 200px;',
-                        'input': (e) => {
-                            _this.setSearchTerm(e.target.value);
-                        }
-                    })
+                    E('div', { 'style': 'display: flex; gap: 10px; align-items: center;' }, [
+                        E('select', {
+                            'id': 'ip-filter-select',
+                            'class': 'cbi-input-select',
+                            'value': this.ipFilter,
+                            'change': (e) => {
+                                this.ipFilter = e.target.value;
+                                this.currentPage = 1;
+                                this.updateTable(this.ipTableData);
+                            }
+                        }, [
+                            E('option', { 'value': 'all' }, _('All IPs')),
+                            E('option', { 'value': 'ipv4' }, 'IPv4'),
+                            E('option', { 'value': 'ipv6' }, 'IPv6')
+                        ]),
+                        E('input', {
+                            'id': 'ip-search-input',
+                            'type': 'text',
+                            'class': 'cbi-input-text',
+                            'placeholder': _('Search IP...'),
+                            'style': 'width: 150px;',
+                            'input': (e) => {
+                                this.setSearchTerm(e.target.value);
+                            }
+                        })
+                    ])
                 ]),
                 E('table', { 'class': 'table', 'id': 'ip-table' }, [
                     E('tr', { 'class': 'tr table-titles' }, [
