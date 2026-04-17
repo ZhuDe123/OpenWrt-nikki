@@ -234,9 +234,8 @@ function collect_traffic() {
             let ip = ip_list[i];
             let s = ip_values[ip];
 
-            // 首次插入：用旧快照值初始化（避免从 0 开始导致第一次增量为当前值）
-            // 后续更新：累加增量
-            sql += sprintf("INSERT INTO traffic_ip_daily VALUES ('%s', '%s', COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), %d), COALESCE((SELECT download FROM traffic_last_capture WHERE key='ip:%s'), %d)) ", today_str, ip, ip, s.up, ip, s.down);
+            // 首次插入用 0 初始化，后续通过 ON CONFLICT 累加增量
+            sql += sprintf("INSERT INTO traffic_ip_daily VALUES ('%s', '%s', 0, 0) ", today_str, ip);
             sql += "ON CONFLICT(date, ip) DO UPDATE SET ";
             sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.up, ip);
             sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.up, ip);
