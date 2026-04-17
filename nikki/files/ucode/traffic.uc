@@ -67,7 +67,7 @@ function init_db() {
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_yearly (year TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_ip_daily (date TEXT, ip TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, ip));'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_minute (date TEXT, time TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, time));'", shell_quote(DB_PATH)))?.close();
-    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_last_capture (key TEXT PRIMARY KEY, upload INTEGER, download INTEGER);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_last_capture (key TEXT PRIMARY KEY, upload INTEGER, download INTEGER, last_seen INTEGER);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_ip_date ON traffic_ip_daily(date);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_daily_date ON traffic_daily(date);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_monthly_month ON traffic_monthly(month);'", shell_quote(DB_PATH)))?.close();
@@ -83,6 +83,23 @@ function init_db() {
 // ========== 数据采集 ==========
 function collect_traffic() {
     init_db();
+
+    // 检查并迁移旧表（每次采集时检查）
+    let check_migration = sprintf("sqlite3 %s \"PRAGMA table_info(traffic_last_capture);\" | grep -c 'last_seen'", shell_quote(DB_PATH));
+    let migration_p = popen(check_migration);
+    if (migration_p) {
+        let has_field = trim(migration_p.read('all') || '0');
+        migration_p.close();
+        if (has_field == '0') {
+            log("Migrating traffic_last_capture table: adding last_seen column");
+            popen(sprintf("sqlite3 %s \"CREATE TABLE IF NOT EXISTS traffic_last_capture_old AS SELECT key, upload, download FROM traffic_last_capture;\"", shell_quote(DB_PATH)))?.close();
+            popen(sprintf("sqlite3 %s \"DROP TABLE traffic_last_capture;\"", shell_quote(DB_PATH)))?.close();
+            popen(sprintf("sqlite3 %s \"CREATE TABLE traffic_last_capture (key TEXT PRIMARY KEY, upload INTEGER, download INTEGER, last_seen INTEGER);\"", shell_quote(DB_PATH)))?.close();
+            popen(sprintf("sqlite3 %s \"INSERT INTO traffic_last_capture (key, upload, download, last_seen) SELECT key, upload, download, CAST(strftime('%%s','now') AS INTEGER) FROM traffic_last_capture_old;\"", shell_quote(DB_PATH)))?.close();
+            popen(sprintf("sqlite3 %s \"DROP TABLE traffic_last_capture_old;\"", shell_quote(DB_PATH)))?.close();
+            log("Migration completed successfully");
+        }
+    }
 
     let lock_file = '/tmp/nikki/traffic.lock';
     if (stat(lock_file)) {
@@ -108,6 +125,7 @@ function collect_traffic() {
     function release_lock() { system("rm -f " + lock_file); }
 
     try {
+        // Step 1: 从 API 获取原始数据（ucode 只做搬运）
         let p1 = popen(get_api_url("/traffic/summary"));
         let summary_res = p1 ? p1.read('all') : '{}';
         if (p1) p1.close();
@@ -121,20 +139,13 @@ function collect_traffic() {
 
         let up_total = summary_data.upTotal || 0;
         let down_total = summary_data.downTotal || 0;
-        let ip_stats = {};
-
+        
+        // 调试：打印 JSON 解析结果
+        log(sprintf("DEBUG: upTotal=%d downTotal=%d ipStats type=%s", up_total, down_total, type(summary_data.ipStats)));
         if (summary_data.ipStats) {
-            for (let i = 0; i < length(summary_data.ipStats); i++) {
-                let ip_stat = summary_data.ipStats[i];
-                let ip = ip_stat.ip;
-                if (ip && ip != 'unknown' && ip != 'invalid IP') {
-                    if (!ip_stats[ip]) ip_stats[ip] = { up: 0, down: 0 };
-                    ip_stats[ip].up += ip_stat.upload || 0;
-                    ip_stats[ip].down += ip_stat.download || 0;
-                }
-            }
+            log(sprintf("DEBUG: ipStats length=%d", length(summary_data.ipStats)));
         }
-
+        
         let now = time();
         let t = localtime(now);
         let today_str = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday);
@@ -142,64 +153,108 @@ function collect_traffic() {
         let time_str = sprintf('%02d:%02d', t.hour, t.min);
         let year_str = sprintf('%d', t.year);
 
-        let last_up = 0, last_down = 0;
-        let q = sprintf("sqlite3 %s 'SELECT upload, download FROM traffic_last_capture WHERE key=\"last\";'", shell_quote(DB_PATH));
-        let lp = popen(q);
-        if (lp) {
-            let line = lp.read('line');
-            if (line) {
-                let ps = split(line, '|');
-                last_up = int(ps[0]) || 0;
-                last_down = int(ps[1]) || 0;
-            }
-            lp.close();
-        }
-
-        let up_d = up_total - last_up;
-        let down_d = down_total - last_down;
-        if (up_d < 0) up_d = up_total;
-        if (down_d < 0) down_d = down_total;
-
-        let last_ips = {};
-        let iq = sprintf("sqlite3 %s 'SELECT key, upload, download FROM traffic_last_capture WHERE key LIKE \"ip:%\";'", shell_quote(DB_PATH));
-        let ip = popen(iq);
-        if (ip) {
-            let line;
-            while ((line = ip.read('line')) != null) {
-                let ps = split(line, '|');
-                if (length(ps) >= 3) {
-                    let ipk = replace(ps[0], "ip:", "");
-                    last_ips[ipk] = { up: int(ps[1]) || 0, down: int(ps[2]) || 0 };
+        // Step 2: 收集当前所有 IP 及其原始值（不计算差值）
+        let ip_list = [];
+        let ip_values = {};
+        let ip_seen = {};  // 用于去重
+        if (summary_data.ipStats) {
+            for (let i = 0; i < length(summary_data.ipStats); i++) {
+                let ip_stat = summary_data.ipStats[i];
+                let ip = ip_stat.ip;
+                if (ip && ip != 'unknown' && ip != 'invalid IP') {
+                    if (!ip_values[ip]) ip_values[ip] = { up: 0, down: 0 };
+                    ip_values[ip].up += ip_stat.upload || 0;
+                    ip_values[ip].down += ip_stat.download || 0;
+                    if (!ip_seen[ip]) {
+                        ip_seen[ip] = true;
+                        push(ip_list, ip);
+                    }
                 }
             }
-            ip.close();
         }
+        
+        // 调试：打印 IP 列表
+        log(sprintf("DEBUG: Found %d unique IPs: %s", length(ip_list), join(", ", ip_list)));
 
+        // Step 3: 构建 SQL（所有增量计算在 SQLite 内部完成）
+        // 注意：必须先计算增量，最后才更新快照！否则读取到新值就错了
         let sql = "BEGIN;\n";
-        sql += sprintf("INSERT OR REPLACE INTO traffic_last_capture VALUES ('last', %d, %d);\n", up_total, down_total);
-        sql += sprintf("INSERT OR REPLACE INTO traffic_daily VALUES ('%s', %d, %d, %d);\n", today_str, up_d, down_d, now);
-        sql += sprintf("INSERT OR REPLACE INTO traffic_monthly VALUES ('%s', %d, %d, %d);\n", month_str, up_d, down_d, now);
-        sql += sprintf("INSERT OR REPLACE INTO traffic_yearly VALUES ('%s', %d, %d, %d);\n", year_str, up_d, down_d, now);
-        sql += sprintf("INSERT OR REPLACE INTO traffic_minute VALUES ('%s', '%s', %d, %d);\n", today_str, time_str, up_d, down_d);
 
-        let ip_list = [];
-        for (let k in ip_stats) push(ip_list, k);
+        // 3.1 全局流量：先计算增量并累加（此时读取的是旧快照）
+        sql += sprintf("INSERT INTO traffic_daily VALUES ('%s', 0, 0, %d) ", today_str, now);
+        sql += "ON CONFLICT(date) DO UPDATE SET ";
+        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("ELSE %d END), ", up_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("ELSE %d END), ", down_total);
+        sql += sprintf("updated_at = %d;\n", now);
+
+        sql += sprintf("INSERT INTO traffic_monthly VALUES ('%s', 0, 0, %d) ", month_str, now);
+        sql += "ON CONFLICT(month) DO UPDATE SET ";
+        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("ELSE %d END), ", up_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("ELSE %d END), ", down_total);
+        sql += sprintf("updated_at = %d;\n", now);
+
+        sql += sprintf("INSERT INTO traffic_yearly VALUES ('%s', 0, 0, %d) ", year_str, now);
+        sql += "ON CONFLICT(year) DO UPDATE SET ";
+        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("ELSE %d END), ", up_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("ELSE %d END), ", down_total);
+        sql += sprintf("updated_at = %d;\n", now);
+
+        sql += sprintf("INSERT INTO traffic_minute VALUES ('%s', '%s', 0, 0) ", today_str, time_str);
+        sql += "ON CONFLICT(date, time) DO UPDATE SET ";
+        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("ELSE %d END), ", up_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("ELSE %d END);\n", down_total);
+
+        // 3.2 IP 流量：先计算增量并累加（此时读取的是旧快照）
         for (let i = 0; i < length(ip_list); i++) {
             let ip = ip_list[i];
-            let s = ip_stats[ip];
-            let lst = last_ips[ip] || { up: 0, down: 0 };
-            let du = s.up - lst.up;
-            let dd = s.down - lst.down;
-            if (du < 0) du = s.up;
-            if (dd < 0) dd = s.down;
-            sql += sprintf("INSERT OR REPLACE INTO traffic_last_capture VALUES ('ip:%s', %d, %d);\n", ip, s.up, s.down);
-            if (du > 0 || dd > 0) {
-                sql += sprintf("INSERT OR REPLACE INTO traffic_ip_daily VALUES ('%s', '%s', %d, %d);\n", today_str, ip, du, dd);
-            }
+            let s = ip_values[ip];
+
+            // 第一次 INSERT 时初始化当前值（不是 0），后续才累加增量
+            sql += sprintf("INSERT INTO traffic_ip_daily VALUES ('%s', '%s', COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), %d), COALESCE((SELECT download FROM traffic_last_capture WHERE key='ip:%s'), %d)) ", today_str, ip, ip, s.up, ip, s.down);
+            sql += "ON CONFLICT(date, ip) DO UPDATE SET ";
+            sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.up, ip);
+            sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.up, ip);
+            sql += sprintf("ELSE %d END), ", s.up);
+            sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.down, ip);
+            sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.down, ip);
+            sql += sprintf("ELSE %d END);\n", s.down);
         }
 
+        // 3.3 最后才更新快照（这样前面的计算读到的是旧值）
+        sql += sprintf("INSERT INTO traffic_last_capture VALUES ('last', %d, %d, %d) ", up_total, down_total, now);
+        sql += "ON CONFLICT(key) DO UPDATE SET upload=excluded.upload, download=excluded.download, last_seen=excluded.last_seen;\n";
+
+        for (let i = 0; i < length(ip_list); i++) {
+            let ip = ip_list[i];
+            let s = ip_values[ip];
+            sql += sprintf("INSERT INTO traffic_last_capture VALUES ('ip:%s', %d, %d, %d) ", ip, s.up, s.down, now);
+            sql += "ON CONFLICT(key) DO UPDATE SET upload=excluded.upload, download=excluded.download, last_seen=excluded.last_seen;\n";
+        }
+
+        // 3.4 清理过期 IP 快照（10 分钟未出现）
+        sql += sprintf("DELETE FROM traffic_last_capture WHERE key LIKE 'ip:%%' AND (last_seen < %d OR last_seen IS NULL);\n", now - 600);
+
         sql += "COMMIT;\n";
-        popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(sql)))?.close();
+        
+        // 使用 printf + 管道执行 SQL，避免临时文件和 shell_quote 问题
+        let cmd = sprintf("printf '%%s' %s | sqlite3 %s", shell_quote(sql), shell_quote(DB_PATH));
+        popen(cmd)?.close();
 
         log(sprintf("Collect OK | up=%d down=%d ips=%d", up_total, down_total, length(ip_list)));
 
@@ -243,28 +298,69 @@ function query_stats(period, date_val) {
     let db = DB_PATH;
 
     if (period == 'year') {
-        let m = popen(sprintf("sqlite3 -json %s 'SELECT month, upload, download FROM traffic_monthly WHERE month LIKE \"%s-%%\" ORDER BY month;'", shell_quote(db), date_val));
-        let mon = m ? m.read('all') : '[]'; if (m) m.close();
-        let y = popen(sprintf("sqlite3 -json %s 'SELECT * FROM traffic_yearly WHERE year=\"%s\";'", shell_quote(db), date_val));
-        let yea = y ? y.read('all') : '[]'; if (y) y.close();
-        return sprintf('{"monthly":%s,"yearly":%s}', mon, yea);
+        let mon = '[]';
+        let yea = '[]';
+        if (stat(DB_PATH)) {
+            let m = popen(sprintf("sqlite3 -json %s 'SELECT month, upload, download FROM traffic_monthly WHERE month LIKE \"%s-%%\" ORDER BY month;'", shell_quote(db), date_val));
+            if (m) {
+                let result = m.read('all');
+                m.close();
+                if (result && match(result, /^\s*\[/)) mon = trim(result);
+            }
+            let y = popen(sprintf("sqlite3 -json %s 'SELECT * FROM traffic_yearly WHERE year=\"%s\";'", shell_quote(db), date_val));
+            if (y) {
+                let result = y.read('all');
+                y.close();
+                if (result && match(result, /^\s*\[/)) yea = trim(result);
+            }
+        }
+        return sprintf('{"monthly":%s,"yearly":%s,"ip":[]}', mon, yea);
     }
 
     if (period == 'month') {
-        let d = popen(sprintf("sqlite3 -json %s 'SELECT date, upload, download FROM traffic_daily WHERE date LIKE \"%s-%%\" ORDER BY date;'", shell_quote(db), date_val));
-        let day = d ? d.read('all') : '[]'; if (d) d.close();
-        let m = popen(sprintf("sqlite3 -json %s 'SELECT * FROM traffic_monthly WHERE month=\"%s\";'", shell_quote(db), date_val));
-        let mon = m ? m.read('all') : '[]'; if (m) m.close();
-        return sprintf('{"daily":%s,"monthly":%s}', day, mon);
+        let day = '[]';
+        let mon = '[]';
+        if (stat(DB_PATH)) {
+            let d = popen(sprintf("sqlite3 -json %s 'SELECT date, upload, download FROM traffic_daily WHERE date LIKE \"%s-%%\" ORDER BY date;'", shell_quote(db), date_val));
+            if (d) {
+                let result = d.read('all');
+                d.close();
+                if (result && match(result, /^\s*\[/)) day = trim(result);
+            }
+            let m = popen(sprintf("sqlite3 -json %s 'SELECT * FROM traffic_monthly WHERE month=\"%s\";'", shell_quote(db), date_val));
+            if (m) {
+                let result = m.read('all');
+                m.close();
+                if (result && match(result, /^\s*\[/)) mon = trim(result);
+            }
+        }
+        return sprintf('{"daily":%s,"monthly":%s,"ip":[]}', day, mon);
     }
 
     if (period == 'day') {
-        let mi = popen(sprintf("sqlite3 -json %s 'SELECT time, upload, download FROM traffic_minute WHERE date=\"%s\" AND time<=\"%s\" ORDER BY time;'", shell_quote(db), date_val, now_time));
-        let min = mi ? mi.read('all') : '[]'; if (mi) mi.close();
-        let g = popen(sprintf("sqlite3 -json %s 'SELECT * FROM traffic_daily WHERE date=\"%s\";'", shell_quote(db), date_val));
-        let glo = g ? g.read('all') : '[]'; if (g) g.close();
-        let i = popen(sprintf("sqlite3 -json %s 'SELECT ip, upload, download FROM traffic_ip_daily WHERE date=\"%s\" ORDER BY (upload+download) DESC LIMIT 50;'", shell_quote(db), date_val));
-        let ip = i ? i.read('all') : '[]'; if (i) i.close();
+        let min = '[]';
+        let glo = '[]';
+        let ip = '[]';
+        if (stat(DB_PATH)) {
+            let mi = popen(sprintf("sqlite3 -json %s 'SELECT time, upload, download FROM traffic_minute WHERE date=\"%s\" AND time<=\"%s\" ORDER BY time;'", shell_quote(db), date_val, now_time));
+            if (mi) {
+                let result = mi.read('all');
+                mi.close();
+                if (result && match(result, /^\s*\[/)) min = trim(result);
+            }
+            let g = popen(sprintf("sqlite3 -json %s 'SELECT * FROM traffic_daily WHERE date=\"%s\";'", shell_quote(db), date_val));
+            if (g) {
+                let result = g.read('all');
+                g.close();
+                if (result && match(result, /^\s*\[/)) glo = trim(result);
+            }
+            let i = popen(sprintf("sqlite3 -json %s 'SELECT ip, upload, download FROM traffic_ip_daily WHERE date=\"%s\" ORDER BY (upload+download) DESC LIMIT 50;'", shell_quote(db), date_val));
+            if (i) {
+                let result = i.read('all');
+                i.close();
+                if (result && match(result, /^\s*\[/)) ip = trim(result);
+            }
+        }
         return sprintf('{"minute":%s,"global":%s,"ip":%s}', min, glo, ip);
     }
 
@@ -276,12 +372,32 @@ function query_history(days) {
     let t = localtime(time());
     let today = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday);
     let db = shell_quote(DB_PATH);
-    let daily = popen(sprintf("sqlite3 -json %s 'SELECT date, upload, download FROM traffic_daily WHERE date >= date(\"now\", \"-%d days\") ORDER BY date DESC;'", db, days));
-    let d = daily ? daily.read('all') : '[]'; if (daily) daily.close();
-    let monthly = popen(sprintf("sqlite3 -json %s 'SELECT month, upload, download FROM traffic_monthly ORDER BY month DESC LIMIT 12;'", db));
-    let m = monthly ? monthly.read('all') : '[]'; if (monthly) monthly.close();
-    let top = popen(sprintf("sqlite3 -json %s 'SELECT ip, upload, download FROM traffic_ip_daily WHERE date=\"%s\" ORDER BY (upload+download) DESC LIMIT 10;'", db, today));
-    let i = top ? top.read('all') : '[]'; if (top) top.close();
+
+    let d = '[]';
+    let m = '[]';
+    let i = '[]';
+
+    if (stat(DB_PATH)) {
+        let daily = popen(sprintf("sqlite3 -json %s 'SELECT date, upload, download FROM traffic_daily WHERE date >= date(\"now\", \"-%d days\") ORDER BY date DESC;'", db, days));
+        if (daily) {
+            let result = daily.read('all');
+            daily.close();
+            if (result && match(result, /^\s*\[/)) d = trim(result);
+        }
+        let monthly = popen(sprintf("sqlite3 -json %s 'SELECT month, upload, download FROM traffic_monthly ORDER BY month DESC LIMIT 12;'", db));
+        if (monthly) {
+            let result = monthly.read('all');
+            monthly.close();
+            if (result && match(result, /^\s*\[/)) m = trim(result);
+        }
+        let top = popen(sprintf("sqlite3 -json %s 'SELECT ip, upload, download FROM traffic_ip_daily WHERE date=\"%s\" ORDER BY (upload+download) DESC LIMIT 10;'", db, today));
+        if (top) {
+            let result = top.read('all');
+            top.close();
+            if (result && match(result, /^\s*\[/)) i = trim(result);
+        }
+    }
+
     print(sprintf('{"daily":%s,"monthly":%s,"top_ip":%s}', d, m, i));
 }
 
