@@ -63,9 +63,9 @@ function init_db() {
     // 确保 /tmp/nikki 目录存在
     if (!stat('/tmp/nikki')) mkdir('/tmp/nikki', 0700);
     
-    // 初始化标记：如果已存在说明表结构已创建，直接返回
+    // 初始化标记：只有数据库文件存在时才跳过初始化
     let init_flag = '/tmp/nikki/traffic.db.init';
-    if (stat(init_flag)) return;
+    if (stat(DB_PATH) && stat(init_flag)) return;
 
     // 开启 WAL 模式（提高并发写入性能）
     popen(sprintf("sqlite3 %s 'PRAGMA journal_mode=WAL;'", shell_quote(DB_PATH)))?.close();
