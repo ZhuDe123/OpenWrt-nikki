@@ -280,9 +280,11 @@ function collect_traffic() {
             let ip_up_delta = s.up - last_ip.up;
             let ip_down_delta = s.down - last_ip.down;
             
-            // 如果差值为负，说明计数器重置，直接使用当前值
-            if (ip_up_delta < 0) ip_up_delta = s.up;
-            if (ip_down_delta < 0) ip_down_delta = s.down;
+            // 【关键修复】如果差值为负或异常大，说明 IP 曾离线，API 计数器已重置
+            // 或者 IP 再次上线时返回的是从服务启动的累计值
+            // 此时使用当前值作为增量，不累加历史值
+            if (ip_up_delta < 0 || ip_up_delta > up_total) ip_up_delta = s.up;
+            if (ip_down_delta < 0 || ip_down_delta > down_total) ip_down_delta = s.down;
             
             // 【关键修复】无论是否有流量，都必须更新快照！
             // 否则下次采集时差值会包含多个周期的流量
