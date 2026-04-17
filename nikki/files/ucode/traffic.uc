@@ -3,6 +3,7 @@
 // 功能：采集全局流量 + IP 流量 + 分钟/日/月/年度统计
 // 架构：ucode 只做数据搬运，所有增量计算由 SQLite 完成（避免 32 位整数溢出）
 // 设计：数据库在 /tmp 内存盘，重启自动重建，无需迁移逻辑
+// 修复：基于新接口特性，直接使用 upTotal/downTotal 作为全局流量，ipStats 作为 IP 流量
 
 import { open, mkdir, chmod, stat, popen } from 'fs';
 import { cursor } from 'uci';
@@ -62,14 +63,14 @@ function get_api_url(path) {
 function init_db() {
     // 确保 /tmp/nikki 目录存在
     if (!stat('/tmp/nikki')) mkdir('/tmp/nikki', 0700);
-    
+
     // 初始化标记：只有数据库文件存在时才跳过初始化
     let init_flag = '/tmp/nikki/traffic.db.init';
     if (stat(DB_PATH) && stat(init_flag)) return;
 
     // 开启 WAL 模式（提高并发写入性能）
     popen(sprintf("sqlite3 %s 'PRAGMA journal_mode=WAL;'", shell_quote(DB_PATH)))?.close();
-    
+
     // 创建核心数据表
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_daily (date TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_monthly (month TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
@@ -78,14 +79,14 @@ function init_db() {
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_minute (date TEXT, time TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, time));'", shell_quote(DB_PATH)))?.close();
     // last_seen 字段：记录最后一次出现的时间，用于 10 分钟过期清理
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_last_capture (key TEXT PRIMARY KEY, upload INTEGER, download INTEGER, last_seen INTEGER);'", shell_quote(DB_PATH)))?.close();
-    
+
     // 创建索引（加速查询）
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_ip_date ON traffic_ip_daily(date);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_daily_date ON traffic_daily(date);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_monthly_month ON traffic_monthly(month);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_yearly_year ON traffic_yearly(year);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_minute_date ON traffic_minute(date, time);'", shell_quote(DB_PATH)))?.close();
-    
+
     // 设置数据库权限（仅 root 可读写）
     chmod(DB_PATH, 0600);
 
@@ -130,23 +131,23 @@ function collect_traffic() {
     function release_lock() { system("rm -f " + lock_file); }
 
     try {
-        // Step 1: 从 Mihomo API 获取原始流量数据（ucode 只做搬运，不计算）
-        let p1 = popen(get_api_url("/traffic/summary"));
+        // Step 1: 从新接口获取数据（包含全局总和 + IP 累计值，新接口已保证 ipStats 总和 <= upTotal）
+        let p1 = popen(get_api_url("/traffic/ip/accumulated"));
         let summary_res = p1 ? p1.read('all') : '{}';
         if (p1) p1.close();
 
         // 验证 JSON 格式和必要字段
         let summary_data = summary_res && match(summary_res, /^\s*\{/) ? json(summary_res) : {};
         if (!summary_data || !summary_data.upTotal) {
-            log("Error: Failed to get traffic data from /traffic/summary");
+            log("Error: Failed to get traffic data from /traffic/ip/accumulated");
             release_lock();
             return;
         }
 
-        // 提取全局累计值（从 Mihomo 服务启动到现在的总量）
+        // 提取全局累计值（直接使用接口返回的 upTotal/downTotal，新接口已保证准确性）
         let up_total = summary_data.upTotal || 0;
         let down_total = summary_data.downTotal || 0;
-        
+
         // 计算当前时间信息（用于数据库记录）
         let now = time();
         let t = localtime(now);
@@ -155,93 +156,92 @@ function collect_traffic() {
         let time_str = sprintf('%02d:%02d', t.hour, t.min);
         let year_str = sprintf('%d', t.year);
 
-        // Step 2: 收集当前所有活跃 IP 及其原始累计值（不计算差值）
+        // Step 2: 收集当前所有活跃 IP 及其原始累计值（新接口已去重，直接使用）
         let ip_list = [];
         let ip_values = {};
-        let ip_seen = {};  // 哈希表用于去重
         if (summary_data.ipStats) {
             for (let i = 0; i < length(summary_data.ipStats); i++) {
                 let ip_stat = summary_data.ipStats[i];
                 let ip = ip_stat.ip;
                 // 过滤无效 IP
                 if (ip && ip != 'unknown' && ip != 'invalid IP') {
-                    if (!ip_values[ip]) ip_values[ip] = { up: 0, down: 0 };
-                    ip_values[ip].up += ip_stat.upload || 0;
-                    ip_values[ip].down += ip_stat.download || 0;
-                    // 去重：同一个 IP 只加入列表一次
-                    if (!ip_seen[ip]) {
-                        ip_seen[ip] = true;
-                        push(ip_list, ip);
-                    }
+                    ip_values[ip] = { up: ip_stat.upload || 0, down: ip_stat.download || 0 };
+                    push(ip_list, ip);
                 }
             }
         }
-        
-        // 调试：打印 IP 列表
-        log(sprintf("DEBUG: Found %d unique IPs: %s", length(ip_list), join(", ", ip_list)));
 
         // Step 3: 构建 SQL（所有增量计算在 SQLite 内部完成，避免 ucode 32 位整数溢出）
-        // 核心公式：增量 = (当前值 >= 旧值) ? (当前值 - 旧值) : 当前值（处理服务重启）
+        // 核心公式：
+        //   - 首次采集（旧快照不存在）：增量 = 0
+        //   - 正常采集（当前值 >= 旧值）：增量 = 当前值 - 旧值
+        //   - 服务重启（当前值 < 旧值）：增量 = 当前值
         // 执行顺序：先计算增量（读取旧快照）→ 最后才更新快照
         let sql = "BEGIN;\n";
 
         // 3.1 全局流量：累加今日/本月/本年的增量（此时读取的是 traffic_last_capture 中的旧快照）
+        // INSERT：首次采集用 API 值初始化；后续采集用 0
+        // ON CONFLICT：计算增量（仅当快照存在时触发）
         // 日级统计
-        sql += sprintf("INSERT INTO traffic_daily VALUES ('%s', 0, 0, %d) ", today_str, now);
+        sql += sprintf("INSERT INTO traffic_daily VALUES ('%s', ", today_str);
+        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
+        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", down_total);
+        sql += sprintf("%d) ", now);
         sql += "ON CONFLICT(date) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
         sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
         sql += sprintf("ELSE %d END), ", down_total);
         sql += sprintf("updated_at = %d;\n", now);
 
         // 月级统计
-        sql += sprintf("INSERT INTO traffic_monthly VALUES ('%s', 0, 0, %d) ", month_str, now);
+        sql += sprintf("INSERT INTO traffic_monthly VALUES ('%s', ", month_str);
+        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
+        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", down_total);
+        sql += sprintf("%d) ", now);
         sql += "ON CONFLICT(month) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
         sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
         sql += sprintf("ELSE %d END), ", down_total);
         sql += sprintf("updated_at = %d;\n", now);
 
         // 年级统计
-        sql += sprintf("INSERT INTO traffic_yearly VALUES ('%s', 0, 0, %d) ", year_str, now);
+        sql += sprintf("INSERT INTO traffic_yearly VALUES ('%s', ", year_str);
+        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
+        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", down_total);
+        sql += sprintf("%d) ", now);
         sql += "ON CONFLICT(year) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
         sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
         sql += sprintf("ELSE %d END), ", down_total);
         sql += sprintf("updated_at = %d;\n", now);
 
         // 分钟级统计
-        sql += sprintf("INSERT INTO traffic_minute VALUES ('%s', '%s', 0, 0) ", today_str, time_str);
+        sql += sprintf("INSERT INTO traffic_minute VALUES ('%s', '%s', ", today_str, time_str);
+        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
+        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END) ", down_total);
         sql += "ON CONFLICT(date, time) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='last'), 0) ", up_total);
+        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
         sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
-        sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='last'), 0) ", down_total);
+        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
         sql += sprintf("ELSE %d END);\n", down_total);
 
-        // 3.2 IP 流量：为每个活跃 IP 累加增量（逻辑同全局流量）
+        // 3.2 IP 流量：为每个活跃 IP 累加增量（逻辑同全局流量，新接口已保证数据准确性）
         for (let i = 0; i < length(ip_list); i++) {
             let ip = ip_list[i];
             let s = ip_values[ip];
 
-            // 首次插入用 0 初始化，后续通过 ON CONFLICT 累加增量
-            sql += sprintf("INSERT INTO traffic_ip_daily VALUES ('%s', '%s', 0, 0) ", today_str, ip);
+            // INSERT：首次用 API 值初始化；后续用 0
+            // ON CONFLICT：计算增量
+            sql += sprintf("INSERT INTO traffic_ip_daily VALUES ('%s', '%s', ", today_str, ip);
+            sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='ip:%s') IS NULL THEN %d ELSE 0 END, ", ip, s.up);
+            sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='ip:%s') IS NULL THEN %d ELSE 0 END) ", ip, s.down);
             sql += "ON CONFLICT(date, ip) DO UPDATE SET ";
-            sql += sprintf("upload = upload + (CASE WHEN %d >= COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.up, ip);
-            sql += sprintf("THEN %d - COALESCE((SELECT upload FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.up, ip);
+            sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='ip:%s') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='ip:%s') ", s.up, ip, s.up, ip);
             sql += sprintf("ELSE %d END), ", s.up);
-            sql += sprintf("download = download + (CASE WHEN %d >= COALESCE((SELECT download FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.down, ip);
-            sql += sprintf("THEN %d - COALESCE((SELECT download FROM traffic_last_capture WHERE key='ip:%s'), 0) ", s.down, ip);
+            sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='ip:%s') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='ip:%s') ", s.down, ip, s.down, ip);
             sql += sprintf("ELSE %d END);\n", s.down);
         }
 
@@ -250,7 +250,7 @@ function collect_traffic() {
         sql += sprintf("INSERT INTO traffic_last_capture VALUES ('last', %d, %d, %d) ", up_total, down_total, now);
         sql += "ON CONFLICT(key) DO UPDATE SET upload=excluded.upload, download=excluded.download, last_seen=excluded.last_seen;\n";
 
-        // 更新各 IP 快照
+        // 更新各 IP 快照（只更新当前出现的 IP）
         for (let i = 0; i < length(ip_list); i++) {
             let ip = ip_list[i];
             let s = ip_values[ip];
