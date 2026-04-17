@@ -7,6 +7,8 @@ import { cursor } from 'uci';
 
 const DB_PATH = '/tmp/nikki/traffic.db';
 const PERSIST_DB = '/etc/nikki/traffic.db.bak';
+const LOG_FILE = '/tmp/nikki/traffic.log';
+const MAX_LOG_SIZE = 1024 * 100; // 100 KB
 
 const uci = cursor();
 const API_SECRET = uci.get('nikki', 'mixin', 'api_secret') || '';
@@ -18,7 +20,45 @@ function log(msg) {
     if (match(msg, /Error|Warning|Fail/)) {
         let t = localtime(time());
         let timestamp = sprintf('%d-%02d-%02d %02d:%02d:%02d', t.year, t.mon, t.mday, t.hour, t.min, t.sec);
-        print(sprintf("[%s] [Traffic] %s\n", timestamp, msg));
+        let log_line = sprintf("[%s] [Traffic] %s\n", timestamp, msg);
+        
+        // 检查日志文件大小
+        if (stat(LOG_FILE)) {
+            let log_stat = stat(LOG_FILE);
+            if (log_stat && log_stat.size > MAX_LOG_SIZE) {
+                // 文件太大，删除旧日志（保留最后 50 行）
+                let lines = [];
+                let f = open(LOG_FILE, 'r');
+                if (f) {
+                    let line;
+                    while ((line = f.read('line')) != null) {
+                        push(lines, line);
+                    }
+                    f.close();
+                    
+                    // 只保留最后 50 行
+                    if (length(lines) > 50) {
+                        lines = slice(lines, length(lines) - 50);
+                    }
+                    
+                    // 重写日志文件
+                    f = open(LOG_FILE, 'w');
+                    if (f) {
+                        for (let l in lines) {
+                            f.write(l + "\n");
+                        }
+                        f.close();
+                    }
+                }
+            }
+        }
+        
+        // 追加日志
+        let f = open(LOG_FILE, 'a');
+        if (f) {
+            f.write(log_line);
+            f.close();
+        }
     }
 }
 
@@ -184,8 +224,12 @@ function collect_traffic() {
             }
             ip_snap_p.close();
         }
+        
+        // 调试日志：输出 IP 快照数量
+        log(sprintf("Loaded %d IP snapshots from database", length(last_ip_stats)));
+        log(sprintf("Current API returned %d IPs", length(ip_stats)));
 
-        // 4. 写入数据库（使用事务合并所有写入，减少进程启动开销）
+        // 7. 写入数据库（使用事务合并所有写入，减少进程启动开销）
         let now = time();
 
         // 使用 localtime 内置函数替代 popen("date")，减少子进程开销
@@ -197,6 +241,12 @@ function collect_traffic() {
 
         // 构建批量 SQL 事务
         let sql_batch = "BEGIN TRANSACTION;\n";
+        
+        // 【关键修复】保存全局快照（用于下次计算增量）
+        sql_batch += sprintf(
+            "INSERT INTO traffic_last_capture VALUES ('last', %d, %d) ON CONFLICT(key) DO UPDATE SET upload=%d, download=%d;\n",
+            up_total, down_total, up_total, down_total
+        );
 
         // 全局总量（日）- 存储当天累计值（使用增量累加）
         sql_batch += sprintf(
@@ -222,29 +272,32 @@ function collect_traffic() {
             today_str, time_str, up_delta, down_delta, up_delta, down_delta
         );
 
-        // IP 统计（批量写入，使用增量累加）
+        // 【关键修复】处理 IP 增量（基于 API 快照，而不是数据库累加值）
         for (let ip, s in ip_stats) {
-            let ip_up_delta, ip_down_delta;
-
-            // 如果是第一次采集，直接使用当前值（作为基准）
-            if (is_first_collection) {
-                ip_up_delta = s.up;
-                ip_down_delta = s.down;
-            } else {
-                // 计算 IP 增量（当前累计值 - 上次累计值）
-                let last_ip = last_ip_stats[ip] || {up: 0, down: 0};
-                ip_up_delta = s.up - last_ip.up;
-                ip_down_delta = s.down - last_ip.down;
-
-                // 如果差值为负，说明计数器重置，直接使用当前值
-                if (ip_up_delta < 0) ip_up_delta = s.up;
-                if (ip_down_delta < 0) ip_down_delta = s.down;
-            }
-
+            let last_ip = last_ip_stats[ip] || {up: 0, down: 0};
+            
+            // 计算 IP 增量（当前 API 快照值 - 上次 API 快照值）
+            let ip_up_delta = s.up - last_ip.up;
+            let ip_down_delta = s.down - last_ip.down;
+            
+            // 如果差值为负，说明计数器重置，直接使用当前值
+            if (ip_up_delta < 0) ip_up_delta = s.up;
+            if (ip_down_delta < 0) ip_down_delta = s.down;
+            
+            // 【关键修复】无论是否有流量，都必须更新快照！
+            // 否则下次采集时差值会包含多个周期的流量
             sql_batch += sprintf(
-                "INSERT INTO traffic_ip_daily VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, ip) DO UPDATE SET upload=upload+%d, download=download+%d;\n",
-                today_str, ip, ip_up_delta, ip_down_delta, ip_up_delta, ip_down_delta
+                "INSERT INTO traffic_last_capture VALUES ('ip:%s', %d, %d) ON CONFLICT(key) DO UPDATE SET upload=%d, download=%d;\n",
+                ip, s.up, s.down, s.up, s.down
             );
+            
+            // 只有当有流量产生时才写入累计表，减少 IO
+            if (ip_up_delta > 0 || ip_down_delta > 0) {
+                sql_batch += sprintf(
+                    "INSERT INTO traffic_ip_daily VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, ip) DO UPDATE SET upload=upload+%d, download=download+%d;\n",
+                    today_str, ip, ip_up_delta, ip_down_delta, ip_up_delta, ip_down_delta
+                );
+            }
         }
 
         sql_batch += "COMMIT;\n";
