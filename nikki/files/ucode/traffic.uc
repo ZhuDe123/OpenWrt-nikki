@@ -84,23 +84,6 @@ function init_db() {
 function collect_traffic() {
     init_db();
 
-    // 检查并迁移旧表（每次采集时检查）
-    let check_migration = sprintf("sqlite3 %s \"PRAGMA table_info(traffic_last_capture);\" | grep -c 'last_seen'", shell_quote(DB_PATH));
-    let migration_p = popen(check_migration);
-    if (migration_p) {
-        let has_field = trim(migration_p.read('all') || '0');
-        migration_p.close();
-        if (has_field == '0') {
-            log("Migrating traffic_last_capture table: adding last_seen column");
-            popen(sprintf("sqlite3 %s \"CREATE TABLE IF NOT EXISTS traffic_last_capture_old AS SELECT key, upload, download FROM traffic_last_capture;\"", shell_quote(DB_PATH)))?.close();
-            popen(sprintf("sqlite3 %s \"DROP TABLE traffic_last_capture;\"", shell_quote(DB_PATH)))?.close();
-            popen(sprintf("sqlite3 %s \"CREATE TABLE traffic_last_capture (key TEXT PRIMARY KEY, upload INTEGER, download INTEGER, last_seen INTEGER);\"", shell_quote(DB_PATH)))?.close();
-            popen(sprintf("sqlite3 %s \"INSERT INTO traffic_last_capture (key, upload, download, last_seen) SELECT key, upload, download, CAST(strftime('%%s','now') AS INTEGER) FROM traffic_last_capture_old;\"", shell_quote(DB_PATH)))?.close();
-            popen(sprintf("sqlite3 %s \"DROP TABLE traffic_last_capture_old;\"", shell_quote(DB_PATH)))?.close();
-            log("Migration completed successfully");
-        }
-    }
-
     let lock_file = '/tmp/nikki/traffic.lock';
     if (stat(lock_file)) {
         let lock_p = open(lock_file, 'r');
