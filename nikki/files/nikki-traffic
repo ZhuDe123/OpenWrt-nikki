@@ -20,6 +20,11 @@ start_service() {
     # 准备目录
     mkdir -p /tmp/nikki /var/run
 
+    # 尝试从闪存恢复备份（路由器重启后自动恢复流量数据）
+    if [ -f /etc/nikki/traffic.db.bak ]; then
+        ucode "$TRAFFIC_UC" restore
+    fi
+
     # 日志轮转（保留最近 1000 行）
     if [ -f "/tmp/nikki/traffic.log" ]; then
         local log_size=$(wc -l < /tmp/nikki/traffic.log 2>/dev/null || echo "0")
@@ -37,6 +42,17 @@ start_service() {
     procd_set_param stderr 1
     procd_set_param pidfile /var/run/nikki-traffic.pid
     procd_close_instance
+}
+
+# 停止服务时自动备份（防止数据丢失）
+stop_service() {
+    # 执行持久化备份
+    if [ -f "$TRAFFIC_UC" ]; then
+        ucode "$TRAFFIC_UC" persist
+    fi
+    
+    # 等待 1 秒确保备份完成
+    sleep 1
 }
 
 # 处理配置修改触发的重载
