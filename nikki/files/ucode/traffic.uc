@@ -46,6 +46,8 @@ function init_db() {
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_yearly (year TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_ip_daily (date TEXT, ip TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, ip));'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_minute (date TEXT, time TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, time));'", shell_quote(DB_PATH)))?.close();
+    // 新增：存储上次采集的累计总量
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_last_capture (key TEXT PRIMARY KEY, upload INTEGER, download INTEGER);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_ip_date ON traffic_ip_daily(date);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_daily_date ON traffic_daily(date);'", shell_quote(DB_PATH)))?.close();
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_monthly_month ON traffic_monthly(month);'", shell_quote(DB_PATH)))?.close();
@@ -134,11 +136,11 @@ function collect_traffic() {
             }
         }
 
-        // 2.1 获取上一次的累计值（用于计算增量）
+        // 2.1 获取上一次的累计总量（从状态表）
         let last_up_total = 0;
         let last_down_total = 0;
-        let last_query = sprintf("sqlite3 %s \"SELECT upload, download FROM traffic_minute WHERE date = '%s' AND time = '%s';\"",
-            shell_quote(DB_PATH), today_str, time_str);
+        let last_query = sprintf("sqlite3 %s \"SELECT upload, download FROM traffic_last_capture WHERE key = 'last';\"",
+            shell_quote(DB_PATH));
         let last_p = popen(last_query);
         if (last_p) {
             let last_line = last_p.read('line');
@@ -158,6 +160,31 @@ function collect_traffic() {
         let down_delta = down_total - last_down_total;
         if (up_delta < 0) up_delta = up_total;
         if (down_delta < 0) down_delta = down_total;
+
+        // 2.3 更新状态表（存储本次的累计总量，供下次采集使用）
+        let update_last_query = sprintf(
+            "INSERT INTO traffic_last_capture VALUES ('last', %d, %d) ON CONFLICT(key) DO UPDATE SET upload=%d, download=%d;",
+            up_total, down_total, up_total, down_total);
+        popen(sprintf("sqlite3 %s %s", shell_quote(DB_PATH), shell_quote(update_last_query)))?.close();
+
+        // 2.3 获取上一次的 IP 累计值（用于计算 IP 增量）
+        let last_ip_stats = {};
+        let ip_query = sprintf("sqlite3 %s \"SELECT ip, upload, download FROM traffic_ip_daily WHERE date = '%s';\"",
+            shell_quote(DB_PATH), today_str);
+        let ip_p = popen(ip_query);
+        if (ip_p) {
+            let line;
+            while ((line = ip_p.read('line')) != null) {
+                let parts = split(line, "|");
+                if (length(parts) >= 3) {
+                    let ip = parts[0];
+                    let up = int(parts[1]) || 0;
+                    let down = int(parts[2]) || 0;
+                    last_ip_stats[ip] = {up: up, down: down};
+                }
+            }
+            ip_p.close();
+        }
 
         // 4. 写入数据库（使用事务合并所有写入，减少进程启动开销）
         let now = time();
@@ -198,11 +225,18 @@ function collect_traffic() {
 
         // IP 统计（批量写入，使用增量累加）
         for (let ip, s in ip_stats) {
-            // 计算 IP 增量（需要获取上次的 IP 累计值）
-            // 简化处理：直接使用当前增量（假设 IP 不频繁变化）
+            // 计算 IP 增量（当前累计值 - 上次累计值）
+            let last_ip = last_ip_stats[ip] || {up: 0, down: 0};
+            let ip_up_delta = s.up - last_ip.up;
+            let ip_down_delta = s.down - last_ip.down;
+            
+            // 如果差值为负，说明计数器重置，直接使用当前值
+            if (ip_up_delta < 0) ip_up_delta = s.up;
+            if (ip_down_delta < 0) ip_down_delta = s.down;
+            
             sql_batch += sprintf(
                 "INSERT INTO traffic_ip_daily VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, ip) DO UPDATE SET upload=upload+%d, download=download+%d;\n",
-                today_str, ip, s.up, s.down, s.up, s.down
+                today_str, ip, ip_up_delta, ip_down_delta, ip_up_delta, ip_down_delta
             );
         }
 
