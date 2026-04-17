@@ -59,6 +59,11 @@ function traffic_stats()
         result.yearly = sqlite_query(
             string.format("SELECT year, upload, download FROM traffic_yearly WHERE year = '%s';",
                 date_val))
+        -- 年度视图：查询当月 IP 统计
+        local current_month = date_val .. "-01"
+        result.ip = sqlite_query(
+            string.format("SELECT ip, SUM(upload) as upload, SUM(download) as download FROM traffic_ip_daily WHERE date LIKE '%s-%%' GROUP BY ip ORDER BY (upload+download) DESC LIMIT 50;",
+                current_month))
 
     elseif period == "month" then
         -- 月份视图：查询每天
@@ -67,6 +72,10 @@ function traffic_stats()
                 date_val))
         result.monthly = sqlite_query(
             string.format("SELECT month, upload, download FROM traffic_monthly WHERE month = '%s';",
+                date_val))
+        -- 月份视图：查询当月 IP 统计
+        result.ip = sqlite_query(
+            string.format("SELECT ip, upload, download FROM traffic_ip_daily WHERE date LIKE '%s-%%' ORDER BY (upload+download) DESC LIMIT 50;",
                 date_val))
 
     else -- period == "day"

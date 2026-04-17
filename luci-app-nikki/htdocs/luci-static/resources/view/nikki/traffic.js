@@ -89,7 +89,15 @@ return view.extend({
             console.log('[Traffic] Response data:', data);
             _this.renderChart(data, period);
             _this.updateTable(data.ip || []);  // 更新表格（自动使用当前搜索词和过滤）
-            _this.updateSummary(data.global || data.monthly || data.daily || []);
+            
+            // 根据视图类型显示摘要
+            if (period === 'day') {
+                _this.updateSummary(data.global || []);  // 日视图：显示当天总量
+            } else if (period === 'month') {
+                _this.updateSummary(data.monthly || []);  // 月视图：显示当月总量
+            } else if (period === 'year') {
+                _this.updateSummary(data.yearly || []);  // 年视图：显示当年总量
+            }
 
             const chartEl = document.getElementById('traffic-chart');
             if (chartEl) {
