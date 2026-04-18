@@ -17,6 +17,69 @@ return view.extend({
     searchTerm: '',  // 搜索关键词
     ipFilter: 'all',  // IP 过滤：all/ipv4/ipv6
 
+    // 前端数据聚合：根据数据量自动调整时间粒度
+    aggregateMinuteData: function(minuteData) {
+        if (!minuteData || minuteData.length === 0) return minuteData;
+        
+        const dataCount = minuteData.length;
+        let interval; // 聚合间隔（分钟）
+        
+        // 根据数据量决定聚合粒度
+        if (dataCount <= 60) {
+            // <= 60条（1小时内）：不聚合，保持原始数据
+            return minuteData;
+        } else if (dataCount <= 300) {
+            // 60-300条（5小时内）：10分钟聚合
+            interval = 10;
+        } else if (dataCount <= 720) {
+            // 300-720条（半天）：30分钟聚合
+            interval = 30;
+        } else {
+            // > 720条（全天1440分钟）：1小时聚合
+            interval = 60;
+        }
+        
+        console.log('[Traffic] Aggregating data: ' + dataCount + ' records with ' + interval + ' min interval');
+        
+        // 按时间间隔聚合数据
+        let aggregated = [];
+        let bucket = null;
+        
+        for (let i = 0; i < minuteData.length; i++) {
+            const item = minuteData[i];
+            const timeStr = item.time || '';
+            const timeParts = timeStr.split(':');
+            if (timeParts.length !== 2) continue;
+            
+            const hour = parseInt(timeParts[0]) || 0;
+            const minute = parseInt(timeParts[1]) || 0;
+            
+            // 计算当前数据点所属的时间桶
+            const bucketMinute = Math.floor(minute / interval) * interval;
+            const bucketTime = String(hour).padStart(2, '0') + ':' + String(bucketMinute).padStart(2, '0');
+            
+            if (!bucket || bucket.time !== bucketTime) {
+                // 新的时间桶
+                if (bucket) aggregated.push(bucket);
+                bucket = {
+                    time: bucketTime,
+                    upload: item.upload || 0,
+                    download: item.download || 0
+                };
+            } else {
+                // 累加到当前桶
+                bucket.upload += (item.upload || 0);
+                bucket.download += (item.download || 0);
+            }
+        }
+        
+        // 添加最后一个桶
+        if (bucket) aggregated.push(bucket);
+        
+        console.log('[Traffic] Aggregated to ' + aggregated.length + ' records');
+        return aggregated;
+    },
+
     // 页面卸载时停止轮询
     handlePageLeave: function() {
         if (this._pollTimer) {
@@ -174,13 +237,16 @@ return view.extend({
                 downData = [];
             }
         } else if (period === 'day') {
-            // 日视图：折线图，显示每分钟
+            // 日视图：折线图，显示每分钟（前端自动聚合）
             chartType = 'line';
             console.log('[Traffic] Day view - data.minute:', data.minute);
             if (data.minute && Array.isArray(data.minute) && data.minute.length > 0) {
-                labels = data.minute.map(d => d.time || '');
-                upData = data.minute.map(d => d.upload || 0);
-                downData = data.minute.map(d => d.download || 0);
+                // 前端数据聚合：根据数据量自动调整时间粒度
+                const aggregatedData = this.aggregateMinuteData(data.minute);
+                labels = aggregatedData.map(d => d.time || '');
+                upData = aggregatedData.map(d => d.upload || 0);
+                downData = aggregatedData.map(d => d.download || 0);
+                console.log('[Traffic] Day view aggregated: ' + data.minute.length + ' -> ' + labels.length + ' points');
             } else {
                 console.log('[Traffic] Day view - No minute data, using empty arrays');
                 labels = [];
@@ -195,6 +261,11 @@ return view.extend({
         }
         
         console.log('[Traffic] Chart data - labels:', labels.length, 'upData:', upData.length, 'downData:', downData.length);
+
+        // 动态调整X轴刻度（聚合后数据量已经优化，直接显示）
+        const dataCount = labels.length;
+        let maxTicksLimit = Math.min(dataCount, 24);  // 最多显示 24 个刻度
+        let autoSkip = true;
 
         this.chart = new Chart(canvas.getContext('2d'), {
             type: chartType,
@@ -246,8 +317,12 @@ return view.extend({
                         ticks: {
                             maxRotation: 0,
                             minRotation: 0,
-                            autoSkip: chartType === 'line',
-                            maxTicksLimit: chartType === 'line' ? 12 : undefined
+                            autoSkip: autoSkip,
+                            maxTicksLimit: maxTicksLimit,
+                            // 手机端字体自适应
+                            font: {
+                                size: window.innerWidth < 768 ? 10 : 12
+                            }
                         }
                     },
                     y: {
@@ -258,6 +333,9 @@ return view.extend({
                         ticks: {
                             callback: function(v) {
                                 return _this.formatBytes(v);
+                            },
+                            font: {
+                                size: window.innerWidth < 768 ? 10 : 12
                             }
                         }
                     }
@@ -379,12 +457,18 @@ return view.extend({
                     this.searchTerm || this.ipFilter !== 'all' ? _('No matching IP found') : _('No data available'))
             ]));
         } else {
+            const isMobile = window.innerWidth < 768;
+            // 手机端数据单元格样式：所有IP都不换行，表格横向滚动
+            const tdStyle = isMobile
+                ? 'white-space: nowrap; padding: 8px; vertical-align: middle; font-size: 12px;'
+                : 'padding: 8px;';
+
             pageData.forEach(row => {
                 tbody.appendChild(E('tr', { 'class': 'tr' }, [
-                    E('td', { 'class': 'td' }, row.ip || row.ip_address || _('Unknown')),
-                    E('td', { 'class': 'td' }, this.formatBytes(row.upload || 0)),
-                    E('td', { 'class': 'td' }, this.formatBytes(row.download || 0)),
-                    E('td', { 'class': 'td' }, this.formatBytes((row.upload || 0) + (row.download || 0)))
+                    E('td', { 'class': 'td', 'style': tdStyle }, row.ip || row.ip_address || _('Unknown')),
+                    E('td', { 'class': 'td', 'style': tdStyle }, this.formatBytes(row.upload || 0)),
+                    E('td', { 'class': 'td', 'style': tdStyle }, this.formatBytes(row.download || 0)),
+                    E('td', { 'class': 'td', 'style': tdStyle }, this.formatBytes((row.upload || 0) + (row.download || 0)))
                 ]));
             });
         }
@@ -509,6 +593,9 @@ return view.extend({
 
     render: function() {
         const _this = this;
+        
+        // 检测是否为移动端设备（红米K80宽度为1080px，但浏览器视口约为400-420px）
+        const isMobile = window.innerWidth < 768;
             
         // 使用本地时区日期，避免 UTC 时区问题
         const now = new Date();
@@ -521,72 +608,100 @@ return view.extend({
         // 初始化 currentDate 为今天（日视图）
         this.currentDate = today;
 
-        let controls = E('div', { 'style': 'margin-bottom: 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;' }, [
-            E('label', { 'style': 'font-weight: bold;' }, _('Period') + ': '),
-            E('select', {
-                'id': 'period-select',
-                'class': 'cbi-input-select',
-                'change': (e) => {
-                    let newPeriod = e.target.value;
-                    console.log('[Traffic] Period changed to: ' + newPeriod);
-                    
-                    // 更新日期 - 使用本地时区
-                    const now = new Date();
-                    const today = now.getFullYear() + '-' + 
-                                  String(now.getMonth() + 1).padStart(2, '0') + '-' + 
-                                  String(now.getDate()).padStart(2, '0');
-                    const thisMonth = today.substring(0, 7);
-                    const thisYear = today.substring(0, 4);
-                    
-                    if (newPeriod === 'year') _this.setCurrentDate(thisYear);
-                    else if (newPeriod === 'month') _this.setCurrentDate(thisMonth);
-                    else _this.setCurrentDate(today);
-                    
-                    _this.updateDateInput(newPeriod);
-                    _this.loadTrafficData();
-                }
-            }, [
-                E('option', { 'value': 'day' }, _('Daily View')),
-                E('option', { 'value': 'month' }, _('Monthly View')),
-                E('option', { 'value': 'year' }, _('Yearly View'))
-            ]),
-            E('label', { 'style': 'font-weight: bold; margin-left: 10px;' }, _('Date') + ': '),
-            E('input', {
-                'id': 'date-input',
-                'type': 'date',  // 默认是日视图，所以使用 date 类型
-                'class': 'cbi-input-text',
-                'value': today,  // 使用今天的日期
-                'autocomplete': 'off',  // 禁用浏览器自动填充
-                'change': () => {
-                    console.log('[Traffic] Date input changed');
-                    let dateInput = document.getElementById('date-input');
-                    if (dateInput && dateInput.value) {
-                        _this.setCurrentDate(dateInput.value);
+        // 手机端优化：动态图表高度
+        const chartHeight = isMobile ? 280 : 400;
+
+        // 手机端优化：控件垂直布局 + 自适应间距
+        const controlStyle = isMobile
+            ? 'margin-bottom: 15px; display: flex; flex-direction: column; gap: 8px; align-items: stretch;'
+            : 'margin-bottom: 20px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;';
+
+        const labelStyle = isMobile
+            ? 'font-weight: bold; margin-bottom: 4px;'
+            : 'font-weight: bold;';
+
+        const controls = E('div', { 'style': controlStyle }, [
+            // 第一行：统计周期
+            E('div', { 'style': isMobile ? 'display: flex; flex-direction: column;' : 'display: flex; align-items: center; gap: 8px;' }, [
+                E('label', { 'style': labelStyle }, _('Period') + ': '),
+                E('select', {
+                    'id': 'period-select',
+                    'class': 'cbi-input-select',
+                    'style': isMobile ? 'min-height: 44px; padding: 8px;' : '',
+                    'change': (e) => {
+                        let newPeriod = e.target.value;
+                        console.log('[Traffic] Period changed to: ' + newPeriod);
+                        
+                        // 更新日期 - 使用本地时区
+                        const now = new Date();
+                        const today = now.getFullYear() + '-' + 
+                                      String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+                                      String(now.getDate()).padStart(2, '0');
+                        const thisMonth = today.substring(0, 7);
+                        const thisYear = today.substring(0, 4);
+                        
+                        if (newPeriod === 'year') _this.setCurrentDate(thisYear);
+                        else if (newPeriod === 'month') _this.setCurrentDate(thisMonth);
+                        else _this.setCurrentDate(today);
+                        
+                        _this.updateDateInput(newPeriod);
                         _this.loadTrafficData();
                     }
-                }
-            }),
-            E('button', {
-                'class': 'cbi-button cbi-button-action',
-                'style': 'margin-left: 10px;',
-                'click': () => _this.loadTrafficData()
-            }, _('Refresh'))
+                }, [
+                    E('option', { 'value': 'day' }, _('Daily View')),
+                    E('option', { 'value': 'month' }, _('Monthly View')),
+                    E('option', { 'value': 'year' }, _('Yearly View'))
+                ])
+            ]),
+            // 第二行：日期选择 + 刷新按钮
+            E('div', { 'style': isMobile ? 'display: flex; gap: 8px; align-items: flex-end;' : 'display: flex; align-items: center; gap: 10px; margin-left: 10px;' }, [
+                E('label', { 'style': labelStyle }, _('Date') + ': '),
+                E('input', {
+                    'id': 'date-input',
+                    'type': 'date',  // 默认是日视图，所以使用 date 类型
+                    'class': 'cbi-input-text',
+                    'style': isMobile ? 'min-height: 44px; padding: 8px; flex: 1;' : '',
+                    'value': today,  // 使用今天的日期
+                    'autocomplete': 'off',  // 禁用浏览器自动填充
+                    'change': () => {
+                        console.log('[Traffic] Date input changed');
+                        let dateInput = document.getElementById('date-input');
+                        if (dateInput && dateInput.value) {
+                            _this.setCurrentDate(dateInput.value);
+                            _this.loadTrafficData();
+                        }
+                    }
+                }),
+                E('button', {
+                    'class': 'cbi-button cbi-button-action',
+                    'style': isMobile ? 'min-height: 44px; min-width: 44px; padding: 8px 16px;' : '',
+                    'click': () => _this.loadTrafficData()
+                }, _('Refresh'))
+            ])
         ]);
 
         let view = E('div', { 'class': 'cbi-map' }, [
             E('h2', {}, _('Traffic Statistics')),
             E('div', { 'id': 'traffic-summary', 'class': 'cbi-section' }),
             controls,
-            E('div', { 'class': 'cbi-section', 'style': 'height: 400px; position: relative;' }, [
+            // 手机端优化：动态高度
+            E('div', { 'class': 'cbi-section', 'style': `height: ${chartHeight}px; position: relative;` }, [
                 E('canvas', { 'id': 'traffic-chart' })
             ]),
             E('div', { 'class': 'cbi-section' }, [
-                E('div', { 'style': 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;' }, [
-                    E('h3', { 'id': 'ip-table-title' }, _('Top IP Traffic')),
-                    E('div', { 'style': 'display: flex; gap: 10px; align-items: center;' }, [
+                E('div', { 'style': isMobile
+                    ? 'display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px;'
+                    : 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; flex-wrap: wrap; gap: 10px;'
+                }, [
+                    E('h3', { 'id': 'ip-table-title', 'style': isMobile ? 'margin: 0;' : '' }, _('Top IP Traffic')),
+                    E('div', { 'style': isMobile
+                        ? 'display: flex; gap: 8px; align-items: stretch; width: 100%;'
+                        : 'display: flex; gap: 10px; align-items: center;'
+                    }, [
                         E('select', {
                             'id': 'ip-filter-select',
                             'class': 'cbi-input-select',
+                            'style': isMobile ? 'min-height: 44px; flex: 1;' : '',
                             'value': this.ipFilter,
                             'change': (e) => {
                                 this.ipFilter = e.target.value;
@@ -598,31 +713,56 @@ return view.extend({
                             E('option', { 'value': 'ipv4' }, 'IPv4'),
                             E('option', { 'value': 'ipv6' }, 'IPv6')
                         ]),
+                        // 手机端优化：搜索框自适应宽度
                         E('input', {
                             'id': 'ip-search-input',
                             'type': 'text',
                             'class': 'cbi-input-text',
                             'placeholder': _('Search IP...'),
-                            'style': 'width: 150px;',
+                            'style': isMobile
+                                ? 'min-height: 44px; flex: 2; padding: 8px;'
+                                : 'width: 150px; padding: 8px;',
                             'input': (e) => {
                                 this.setSearchTerm(e.target.value);
                             }
                         })
                     ])
                 ]),
-                E('table', { 'class': 'table', 'id': 'ip-table' }, [
-                    E('tr', { 'class': 'tr table-titles' }, [
-                        E('th', { 'class': 'th' }, _('IP Address')),
-                        E('th', { 'class': 'th' }, _('Upload')),
-                        E('th', { 'class': 'th' }, _('Download')),
-                        E('th', { 'class': 'th' }, _('Total'))
-                    ]),
-                    E('tbody', { 'id': 'ip-table-body' })
+                // 手机端优化：表格横向滚动（直接使用 tr 作为表头，不用 thead）
+                E('div', { 'id': 'ip-table-wrapper', 'style': isMobile ? 'overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 10px; background: #f8f9fa; border-radius: 4px;' : '' }, [
+                    E('table', { 'class': 'table', 'id': 'ip-table', 'style': isMobile ? 'min-width: 600px; border-collapse: collapse;' : '' }, [
+                        // 直接在表格第一行渲染表头（不用 thead 标签）
+                        E('tr', { 
+                            'class': 'tr table-titles',
+                            'style': isMobile ? 'background: #e9ecef; font-weight: bold; border-bottom: 2px solid #dee2e6;' : ''
+                        }, [
+                            E('th', { 
+                                'class': 'th', 
+                                'style': isMobile ? 'padding: 12px 8px; font-size: 13px; white-space: nowrap; text-align: left; color: #495057;' : '' 
+                            }, _('IP Address')),
+                            E('th', { 
+                                'class': 'th', 
+                                'style': isMobile ? 'padding: 12px 8px; font-size: 13px; white-space: nowrap; text-align: center; color: #495057;' : '' 
+                            }, _('Upload')),
+                            E('th', { 
+                                'class': 'th', 
+                                'style': isMobile ? 'padding: 12px 8px; font-size: 13px; white-space: nowrap; text-align: center; color: #495057;' : '' 
+                            }, _('Download')),
+                            E('th', { 
+                                'class': 'th', 
+                                'style': isMobile ? 'padding: 12px 8px; font-size: 13px; white-space: nowrap; text-align: center; color: #495057;' : '' 
+                            }, _('Total'))
+                        ]),
+                        E('tbody', { 'id': 'ip-table-body' })
+                    ])
                 ]),
+                // 手机端优化：分页控件
                 E('div', {
                     'id': 'ip-pagination',
                     'class': 'cbi-page-control',
-                    'style': 'display: flex; justify-content: center; margin-top: 10px;'
+                    'style': isMobile
+                        ? 'display: flex; justify-content: center; margin-top: 10px; gap: 8px;'
+                        : 'display: flex; justify-content: center; margin-top: 10px;'
                 })
             ])
         ]);

@@ -1187,6 +1187,18 @@ msgstr "数据保留天数"
 msgid "Database Path"
 msgstr "数据库路径"
 
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic.js:525
+msgid "Period"
+msgstr "统计周期"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic.js:553
+msgid "Date"
+msgstr "日期"
+
+#: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/traffic.js:585
+msgid "Top IP Traffic"
+msgstr "Top IP 流量排行"
+
 #: applications/luci-app-nikki/htdocs/luci-static/resources/view/nikki/app.js:213
 msgid "SQLite database file path, recommend using /tmp (RAM) to protect flash storage"
 msgstr "SQLite 数据库文件路径，推荐使用 /tmp (内存) 以保护闪存存储"

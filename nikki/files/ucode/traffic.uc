@@ -335,10 +335,11 @@ function query_stats(period, date_val) {
     let now_time = sprintf('%02d:%02d', t.hour, t.min);
     let db = DB_PATH;
 
-    // 年度视图：查询 12 个月的数据
+    // 年度视图：查询 12 个月的数据 + IP 聚合
     if (period == 'year') {
         let mon = '[]';
         let yea = '[]';
+        let ip = '[]';
         if (stat(DB_PATH)) {
             let m = popen(sprintf("sqlite3 -json %s 'SELECT month, upload, download FROM traffic_monthly WHERE month LIKE \"%s-%%\" ORDER BY month;'", shell_quote(db), date_val));
             if (m) {
@@ -353,14 +354,22 @@ function query_stats(period, date_val) {
                 y.close();
                 if (result && match(result, /^\s*\[/)) yea = trim(result);
             }
+            // 聚合该年度所有 IP 流量
+            let i = popen(sprintf("sqlite3 -json %s 'SELECT ip, SUM(upload) as upload, SUM(download) as download FROM traffic_ip_daily WHERE date LIKE \"%s-%%\" GROUP BY ip ORDER BY (upload+download) DESC LIMIT 50;'", shell_quote(db), date_val));
+            if (i) {
+                let result = i.read('all');
+                i.close();
+                if (result && match(result, /^\s*\[/)) ip = trim(result);
+            }
         }
-        return sprintf('{"monthly":%s,"yearly":%s,"ip":[]}', mon, yea);
+        return sprintf('{"monthly":%s,"yearly":%s,"ip":%s}', mon, yea, ip);
     }
 
-    // 月份视图：查询每天的数据
+    // 月份视图：查询每天的数据 + IP 聚合
     if (period == 'month') {
         let day = '[]';
         let mon = '[]';
+        let ip = '[]';
         if (stat(DB_PATH)) {
             let d = popen(sprintf("sqlite3 -json %s 'SELECT date, upload, download FROM traffic_daily WHERE date LIKE \"%s-%%\" ORDER BY date;'", shell_quote(db), date_val));
             if (d) {
@@ -374,8 +383,15 @@ function query_stats(period, date_val) {
                 m.close();
                 if (result && match(result, /^\s*\[/)) mon = trim(result);
             }
+            // 聚合该月份所有 IP 流量
+            let i = popen(sprintf("sqlite3 -json %s 'SELECT ip, SUM(upload) as upload, SUM(download) as download FROM traffic_ip_daily WHERE date LIKE \"%s-%%\" GROUP BY ip ORDER BY (upload+download) DESC LIMIT 50;'", shell_quote(db), date_val));
+            if (i) {
+                let result = i.read('all');
+                i.close();
+                if (result && match(result, /^\s*\[/)) ip = trim(result);
+            }
         }
-        return sprintf('{"daily":%s,"monthly":%s,"ip":[]}', day, mon);
+        return sprintf('{"daily":%s,"monthly":%s,"ip":%s}', day, mon, ip);
     }
 
     // 日视图：查询分钟级数据 + 今日 IP 排行
