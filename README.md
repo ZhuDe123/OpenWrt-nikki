@@ -19,6 +19,267 @@ Transparent Proxy with Mihomo on OpenWrt.
 - Profile Mixin
 - Profile Editor
 - Scheduled Restart
+- **Traffic Statistics**: Real-time monitoring of global and per-IP traffic usage with daily/monthly/yearly views
+
+## Traffic Statistics Feature
+
+### Features
+- 📊 Real-time refresh (collects every 30 seconds)
+- 📈 Multi-dimensional display: Daily view (line chart), Monthly view (bar chart), Yearly view
+- 🌐 IP Statistics: View traffic distribution for each device
+- 💾 Data persistence: SQLite storage with historical query support
+- 🗑️ Auto cleanup: Configurable data retention days
+- ⚡ High performance: Memory database + WAL mode, CPU usage < 1%
+
+### Architecture
+
+The traffic statistics system consists of:
+
+1. **Mihomo Kernel API**
+   - `/traffic/latest` - Get global cumulative traffic (upload/download totals)
+   - `/traffic/closed` - Get detailed traffic data for closed connections
+   - Automatically records IP and traffic info when connections close
+
+2. **Traffic Collection Script** (`/etc/nikki/ucode/traffic.uc`)
+   - Periodically pulls traffic data from Mihomo API
+   - Calculates incremental traffic (current value - last snapshot value)
+   - Writes to SQLite database (located in /tmp RAM disk)
+   - Automatically handles service restart scenarios (counter reset)
+
+3. **Database Structure**
+   ```sql
+   -- Global daily statistics
+   CREATE TABLE traffic_daily (
+       date TEXT PRIMARY KEY,
+       upload INTEGER,      -- Upload traffic (bytes)
+       download INTEGER,    -- Download traffic (bytes)
+       updated_at INTEGER
+   );
+   
+   -- Global monthly statistics
+   CREATE TABLE traffic_monthly (
+       month TEXT PRIMARY KEY,
+       upload INTEGER,
+       download INTEGER,
+       updated_at INTEGER
+   );
+   
+   -- IP-level daily statistics
+   CREATE TABLE traffic_ip_daily (
+       date TEXT,
+       ip TEXT,
+       upload INTEGER,
+       download INTEGER,
+       PRIMARY KEY(date, ip)
+   );
+   
+   -- Traffic snapshot table (for incremental calculation)
+   CREATE TABLE traffic_last_capture (
+       key TEXT PRIMARY KEY,
+       up_total INTEGER,
+       down_total INTEGER
+   );
+   ```
+
+4. **Web Interface**
+   - Real-time chart display (based on Chart.js)
+   - Support daily/monthly/yearly view switching
+   - IP traffic ranking table
+   - Configuration management page
+
+### How It Works
+
+```
+┌─────────────┐
+│  Mihomo     │ ← /traffic/latest (Global traffic)
+│  Kernel     │ ← /traffic/closed (IP traffic)
+└──────┬──────┘
+       │ Every 30 seconds
+       ▼
+┌─────────────────────┐
+│  traffic.uc Script  │
+│  1. Fetch API data  │
+│  2. Calculate delta │
+│  3. Write to SQLite │
+│  4. Update snapshot │
+└──────┬──────────────┘
+       │
+       ▼
+┌──────────────────────┐
+│  SQLite Database      │
+│  /tmp/nikki/traffic.db│
+│  - traffic_daily      │
+│  - traffic_monthly    │
+│  - traffic_ip_daily   │
+│  - traffic_last_capture│
+└──────┬───────────────┘
+       │
+       ▼
+┌─────────────────────┐
+│  LuCI Web Interface  │
+│  - Real-time charts  │
+│  - IP rankings       │
+│  - History queries   │
+└─────────────────────┘
+```
+
+**Incremental Calculation Logic:**
+- First collection: Increment = 0 (initialize snapshot with API value)
+- Normal collection: Increment = Current value - Last snapshot value
+- Service restart: Increment = Current value (detects current value < snapshot value, indicating counter reset)
+
+### Configuration
+
+#### Method 1: Via LuCI Web Interface
+
+1. Navigate to `Services → Nikki → Plugin Configuration`
+2. Find the "Traffic Statistics" tab
+3. Check "Enable Traffic Statistics"
+4. Configure parameters:
+   - Collection interval: Default 30 seconds
+   - Data retention days: Default 30 days
+   - Database path: Default `/tmp/nikki/traffic.db`
+5. Click "Save & Apply"
+6. Access the "Traffic Statistics" tab to view real-time data
+
+#### Method 2: Via Command Line
+
+```bash
+# Enable traffic statistics
+uci set nikki.traffic.enabled='1'
+
+# Set collection interval (seconds)
+uci set nikki.traffic.collect_interval='30'
+
+# Set data retention days
+uci set nikki.traffic.retain_days='30'
+
+# Commit configuration
+uci commit nikki
+
+# Restart traffic statistics service
+/etc/init.d/nikki-traffic restart
+```
+
+### Common Commands
+
+#### Manually Collect Traffic Data
+
+```bash
+# Execute one traffic collection
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc collect
+```
+
+#### Query Statistics
+
+```bash
+# Query today's statistics
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats day 2026-04-18
+
+# Query this month's statistics
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats month 2026-04
+
+# Query specific date statistics
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats day 2026-04-17
+```
+
+#### Database Operations
+
+```bash
+# View database schema
+sqlite3 /tmp/nikki/traffic.db ".schema"
+
+# View today's traffic statistics
+sqlite3 /tmp/nikki/traffic.db "SELECT * FROM traffic_daily WHERE date='2026-04-18';"
+
+# View this month's traffic statistics
+sqlite3 /tmp/nikki/traffic.db "SELECT * FROM traffic_monthly WHERE month='2026-04';"
+
+# View IP traffic ranking (Today's Top 10)
+sqlite3 /tmp/nikki/traffic.db "SELECT ip, upload, download, (upload+download) as total FROM traffic_ip_daily WHERE date='2026-04-18' ORDER BY total DESC LIMIT 10;"
+
+# View all tables
+sqlite3 /tmp/nikki/traffic.db ".tables"
+
+# View database size
+ls -lh /tmp/nikki/traffic.db
+```
+
+#### Persistence and Cleanup
+
+```bash
+# Manually backup database to flash
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc persist
+
+# Clean up data older than 30 days
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc cleanup 30
+```
+
+#### View Logs
+
+```bash
+# View traffic statistics logs
+logread | grep Traffic
+
+# View real-time logs
+tail -f /tmp/nikki/traffic.log
+```
+
+#### Testing and Diagnostics
+
+```bash
+# Run traffic statistics diagnostic script
+/etc/nikki/scripts/traffic-test.sh
+
+# Test if Mihomo API is available
+curl -s -H "Authorization: Bearer YOUR_SECRET" 'http://127.0.0.1:9090/traffic/latest'
+
+# Test closed connections API
+curl -s -H "Authorization: Bearer YOUR_SECRET" 'http://127.0.0.1:9090/traffic/closed'
+```
+
+### Performance Impact
+
+| Metric | Value | Description |
+|--------|-------|-------------|
+| Memory Usage | ~5MB | SQLite memory database |
+| CPU Usage | < 1% | About 100-500ms per collection |
+| Storage Space | ~1MB/30days | Depends on IP count and connections |
+| Collection Interval | 30s (default) | Not recommended below 30 seconds |
+
+### Notes
+
+1. **Database in RAM disk**: Database is located in `/tmp`, will be lost on restart, system automatically restores from flash backup
+2. **Mihomo API Secret**: Ensure `nikki.mixin.api_secret` is correctly configured
+3. **Collection interval**: Not recommended to set below 30 seconds, will affect performance
+4. **Flash protection**: Database uses RAM disk + periodic backup strategy to avoid frequent flash writes
+5. **Auto cleanup**: Recommended to set reasonable retention days (default 30 days) to prevent unlimited data growth
+
+### Troubleshooting
+
+```bash
+# 1. Check if traffic statistics is enabled
+uci get nikki.traffic.enabled
+
+# 2. Check service status
+ps | grep traffic
+
+# 3. Check database file
+ls -la /tmp/nikki/traffic.db
+
+# 4. Check API Secret
+uci get nikki.mixin.api_secret
+
+# 5. Test API connection
+curl -s -H "Authorization: Bearer $(uci get nikki.mixin.api_secret)" \
+  'http://127.0.0.1:9090/traffic/latest'
+
+# 6. View service logs
+logread | grep nikki-traffic
+
+# 7. Restart traffic statistics service
+/etc/init.d/nikki-traffic restart
+```
 
 ## Install & Update
 

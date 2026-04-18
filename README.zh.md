@@ -29,17 +29,372 @@
 - 🌐 IP 统计：查看各设备的流量分布
 - 💾 数据持久化：使用 SQLite 存储，支持历史查询
 - 🗑️ 自动清理：可配置数据保留天数
+- ⚡ 高性能：内存数据库 + WAL 模式，CPU 占用 < 1%
+
+### 架构设计
+
+流量统计系统由以下组件构成：
+
+1. **Mihomo 内核 API**（基于自定义修改版本：[ZhuDe123/mihomo - Meta分支](https://github.com/ZhuDe123/mihomo.git)）
+   - `/traffic/ip/accumulated` - 获取按 IP 维度累计的流量统计数据
+   - 返回全局总流量（`upTotal`/`downTotal`）和各 IP 流量统计（`ipStats`）
+   - 只在连接关闭后才记录 IP 流量，避免重复统计
+   - 支持 IPv4 和 IPv6 地址
+
+2. **流量采集脚本** (`/etc/nikki/ucode/traffic.uc`)
+   - 定时从 Mihomo API 拉取流量数据
+   - 计算增量流量（当前值 - 上次快照值）
+   - 写入 SQLite 数据库（位于 /tmp 内存盘）
+   - 自动处理服务重启场景（计数器重置）
+
+3. **数据库结构**
+   ```sql
+   -- 全局日统计
+   CREATE TABLE traffic_daily (
+       date TEXT PRIMARY KEY,
+       upload INTEGER,      -- 上传流量（字节）
+       download INTEGER,    -- 下载流量（字节）
+       updated_at INTEGER
+   );
+   
+   -- 全局月统计
+   CREATE TABLE traffic_monthly (
+       month TEXT PRIMARY KEY,
+       upload INTEGER,
+       download INTEGER,
+       updated_at INTEGER
+   );
+   
+   -- IP 级别日统计
+   CREATE TABLE traffic_ip_daily (
+       date TEXT,
+       ip TEXT,
+       upload INTEGER,
+       download INTEGER,
+       PRIMARY KEY(date, ip)
+   );
+   
+   -- 流量快照表（用于计算增量）
+   CREATE TABLE traffic_last_capture (
+       key TEXT PRIMARY KEY,
+       up_total INTEGER,
+       down_total INTEGER
+   );
+   ```
+
+4. **Web 界面**
+   - 实时图表展示（基于 Chart.js）
+   - 支持日/月/年视图切换
+   - IP 流量排名表格
+   - 配置管理页面
+
+### 工作原理
+
+```
+┌─────────────────────────────────┐
+│  Mihomo 内核（自定义版本）       │
+│  /traffic/ip/accumulated        │
+│  - upTotal/downTotal（全局）    │
+│  - ipStats[]（IP维度统计）      │
+│  - 连接关闭时记录流量           │
+└────────────┬────────────────────┘
+             │ 每 30 秒
+             ▼
+┌─────────────────────────────┐
+│  traffic.uc 采集脚本         │
+│  1. 调用 API 获取数据        │
+│  2. 计算增量流量             │
+│  3. 更新日/月/IP 统计表      │
+│  4. 保存快照用于下次计算     │
+└──────────┬──────────────────┘
+           │
+           ▼
+┌──────────────────────────────┐
+│  SQLite 数据库（内存盘）      │
+│  /tmp/nikki/traffic.db       │
+│  - traffic_daily（日统计）    │
+│  - traffic_monthly（月统计）  │
+│  - traffic_ip_daily（IP统计） │
+│  - traffic_last_capture      │
+└──────────┬───────────────────┘
+           │
+           ▼
+┌──────────────────────────────┐
+│  LuCI Web 界面               │
+│  - 实时流量图表               │
+│  - IP 流量排名               │
+│  - 日/月/年视图切换          │
+└──────────────────────────────┘
+```
+
+**增量计算逻辑：**
+- 首次采集：增量 = 0（使用 API 值初始化快照）
+- 正常采集：增量 = 当前值 - 上次快照值
+- 服务重启：增量 = 当前值（检测到当前值 < 快照值，说明计数器重置）
+
+**防重复统计机制：**
+- Mihomo 内核使用 `LoadAndDelete` 原子操作，确保同一连接只被统计一次
+- 即使连接的 `Close()` 被多次调用，只有第一次会触发流量记录
+- 活跃连接流量计入 `upTotal`/`downTotal`，但不在 `ipStats` 中（仅关闭后记录）
 
 ### 配置方法
-1. 在 LuCI → 服务 → Nikki → 插件配置 中勾选"启用流量统计"
-2. 设置采集间隔（默认 30 秒）和保留天数（默认 30 天）
-3. 点击"保存并应用"
-4. 访问"流量统计"选项卡查看实时数据
+
+#### 方法 1: 通过 LuCI Web 界面
+
+1. 访问 `服务 → Nikki → 插件配置`
+2. 找到"流量统计"选项卡
+3. 勾选"启用流量统计"
+4. 配置参数：
+   - 采集间隔：默认 30 秒
+   - 数据保留天数：默认 30 天
+   - 数据库路径：默认 `/tmp/nikki/traffic.db`
+5. 点击"保存并应用"
+6. 访问"流量统计"选项卡查看实时数据
+
+#### 方法 2: 通过命令行
+
+```bash
+# 启用流量统计
+uci set nikki.traffic.enabled='1'
+
+# 设置采集间隔（秒）
+uci set nikki.traffic.collect_interval='30'
+
+# 设置数据保留天数
+uci set nikki.traffic.retain_days='30'
+
+# 提交配置
+uci commit nikki
+
+# 重启流量统计服务
+/etc/init.d/nikki-traffic restart
+```
+
+### 常用命令
+
+#### 手动采集流量数据
+
+```bash
+# 执行一次流量采集
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc collect
+```
+
+#### 查询统计数据
+
+```bash
+# 查询今日统计
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats day 2026-04-18
+
+# 查询本月统计
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats month 2026-04
+
+# 查询指定日期统计
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc stats day 2026-04-17
+```
+
+#### 数据库操作
+
+```bash
+# 查看数据库表结构
+sqlite3 /tmp/nikki/traffic.db ".schema"
+
+# 查看今日流量统计
+sqlite3 /tmp/nikki/traffic.db "SELECT * FROM traffic_daily WHERE date='2026-04-18';"
+
+# 查看本月流量统计
+sqlite3 /tmp/nikki/traffic.db "SELECT * FROM traffic_monthly WHERE month='2026-04';"
+
+# 查看 IP 流量排名（今日 Top 10）
+sqlite3 /tmp/nikki/traffic.db "SELECT ip, upload, download, (upload+download) as total FROM traffic_ip_daily WHERE date='2026-04-18' ORDER BY total DESC LIMIT 10;"
+
+# 查看所有数据表
+sqlite3 /tmp/nikki/traffic.db ".tables"
+
+# 查看数据库大小
+ls -lh /tmp/nikki/traffic.db
+```
+
+#### 持久化和清理
+
+```bash
+# 手动备份数据库到闪存
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc persist
+
+# 清理 30 天前的数据
+/usr/bin/ucode /etc/nikki/ucode/traffic.uc cleanup 30
+```
+
+#### 查看日志
+
+```bash
+# 查看流量统计日志
+logread | grep Traffic
+
+# 查看实时日志
+tail -f /tmp/nikki/traffic.log
+```
+
+#### 测试和诊断
+
+```bash
+# 运行流量统计诊断脚本
+/etc/nikki/scripts/traffic-test.sh
+
+# 测试 Mihomo API 是否可用
+curl -s -H "Authorization: Bearer YOUR_SECRET" \
+  'http://127.0.0.1:9090/traffic/ip/accumulated'
+
+# 查看 API 响应示例
+# {
+#   "upTotal": 5589997,
+#   "downTotal": 34199057,
+#   "ipStats": [
+#     {
+#       "ip": "192.168.5.164",
+#       "upload": 1539074,
+#       "download": 12253165,
+#       "connCount": 338
+#     }
+#   ],
+#   "total": 14,
+#   "queryTimestamp": 1776478807
+# }
+```
 
 ### 性能影响
-- 内存占用：约 5MB
-- CPU 占用：< 1%
-- 存储空间：30 天数据约 1MB
+
+| 指标 | 数值 | 说明 |
+|------|------|------|
+| 内存占用 | ~5MB | SQLite 内存数据库 |
+| CPU 占用 | < 1% | 每次采集约 100-500ms |
+| 存储空间 | ~1MB/30天 | 取决于 IP 数量和连接数 |
+| 采集间隔 | 30秒（默认） | 建议不低于 30 秒 |
+
+### 注意事项
+
+1. **数据库在内存盘**：数据库位于 `/tmp`，重启后会丢失，系统会自动从闪存备份恢复
+2. **Mihomo API Secret**：确保 `nikki.mixin.api_secret` 已正确配置
+3. **采集间隔**：不建议设置低于 30 秒，会影响性能
+4. **闪存保护**：数据库使用内存盘 + 定时备份策略，避免频繁写入闪存
+5. **自动清理**：建议设置合理的保留天数（默认 30 天），避免数据无限增长
+
+### 故障排查
+
+```bash
+# 1. 检查流量统计是否启用
+uci get nikki.traffic.enabled
+
+# 2. 检查服务状态
+ps | grep traffic
+
+# 3. 检查数据库文件
+ls -la /tmp/nikki/traffic.db
+
+# 4. 检查 API Secret
+uci get nikki.mixin.api_secret
+
+# 5. 测试 API 连接
+curl -s -H "Authorization: Bearer $(uci get nikki.mixin.api_secret)" \
+  'http://127.0.0.1:9090/traffic/latest'
+
+# 6. 查看服务日志
+logread | grep nikki-traffic
+
+# 7. 重启流量统计服务
+/etc/init.d/nikki-traffic restart
+```
+
+### Mihomo API 接口详情
+
+#### 接口信息
+
+| 项目 | 说明 |
+|------|------|
+| **接口路径** | `/traffic/ip/accumulated` |
+| **请求方式** | `GET` |
+| **认证方式** | Bearer Token（Header: `Authorization: Bearer $API_SECRET`） |
+| **功能描述** | 获取按 IP 维度累计的流量统计数据，只在连接关闭后才记录流量 |
+
+#### 请求示例
+
+```bash
+curl -s -H "Authorization: Bearer your_secret" \
+  "http://127.0.0.1:9090/traffic/ip/accumulated"
+```
+
+#### 响应数据结构
+
+```json
+{
+  "upTotal": 5589997,
+  "downTotal": 34199057,
+  "ipStats": [
+    {
+      "ip": "192.168.5.164",
+      "upload": 1539074,
+      "download": 12253165,
+      "firstSeen": "2026-04-18T02:00:01.964605831Z",
+      "firstSeenTimestamp": 1776477601,
+      "lastSeen": "2026-04-18T02:20:04.61692775Z",
+      "lastSeenTimestamp": 1776478804,
+      "connCount": 338
+    }
+  ],
+  "total": 14,
+  "queryTimestamp": 1776478807
+}
+```
+
+#### 字段说明
+
+**根字段：**
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| `upTotal` | `int64` | 全局上传总量（字节），包含当前活跃连接的实时流量 |
+| `downTotal` | `int64` | 全局下载总量（字节），包含当前活跃连接的实时流量 |
+| `ipStats` | `array` | IP 维度的累计流量统计数组 |
+| `total` | `int` | 统计到的唯一 IP 数量 |
+| `queryTimestamp` | `int64` | 查询时的 Unix 时间戳（秒） |
+
+**ipStats 数组元素：**
+
+| 字段名 | 类型 | 说明 |
+|--------|------|------|
+| `ip` | `string` | 客户端 IP 地址（IPv4 或 IPv6） |
+| `upload` | `int64` | 该 IP 累计上传流量（字节） |
+| `download` | `int64` | 该 IP 累计下载流量（字节） |
+| `firstSeen` | `string` | 首次出现时间（RFC3339 格式） |
+| `firstSeenTimestamp` | `int64` | 首次出现时间的 Unix 时间戳（秒） |
+| `lastSeen` | `string` | 最后一次连接关闭时间（RFC3339 格式） |
+| `lastSeenTimestamp` | `int64` | 最后一次连接关闭时间的 Unix 时间戳（秒） |
+| `connCount` | `int64` | 该 IP 累计关闭的连接数 |
+
+#### 实现原理
+
+Mihomo 内核通过以下组件实现流量统计：
+
+| 组件 | 职责 |
+|------|------|
+| **Manager** | 管理活跃连接，提供实时流量统计（`upTotal`/`downTotal`） |
+| **Tracker** | 追踪单个 TCP/UDP 连接的流量 |
+| **Accumulator** | 按 IP 维度累计流量，连接关闭时记录 |
+
+**流量统计流程：**
+1. 连接建立 → 创建 Tracker 并加入活跃连接池
+2. 数据传输 → 实时累加到全局统计
+3. 连接关闭 → 从活跃连接池移除，并记录到 IP 累计统计
+
+**防重复统计机制：**
+- 使用 `LoadAndDelete` 原子操作，确保同一连接只被统计一次
+- 即使 `Close()` 被多次调用，只有第一次会触发流量记录
+
+#### 注意事项
+
+1. **数据延迟**：`ipStats` 只在连接关闭时更新，活跃连接的流量不会实时反映
+2. **数据一致性**：`ipStats` 总和 ≤ `upTotal`（差异来自未关闭的活跃连接）
+3. **IP 格式**：支持 IPv4 和 IPv6 地址
+4. **流量单位**：所有流量字段单位为**字节（Bytes）**
 
 ## 安装和更新
 
