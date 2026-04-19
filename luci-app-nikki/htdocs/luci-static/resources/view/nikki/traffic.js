@@ -120,9 +120,9 @@ return view.extend({
         
         let date;
         if (period === 'year') {
-            date = thisYear;
+            date = this.currentDate || thisYear;  // 年视图使用用户选择的年份
         } else if (period === 'month') {
-            date = thisMonth;
+            date = this.currentDate || thisMonth;  // 月视图使用用户选择的月份
         } else {
             date = this.currentDate || today;  // 日视图使用用户选择的日期
         }
@@ -560,6 +560,7 @@ return view.extend({
     // 更新日期输入框类型（仅用于显示，不影响 currentDate）
     updateDateInput: function(period) {
         const dateInput = document.getElementById('date-input');
+        const dateSelect = document.getElementById('date-select');
         if (!dateInput) return;
 
         // 使用本地时区日期
@@ -568,24 +569,34 @@ return view.extend({
                       String(now.getMonth() + 1).padStart(2, '0') + '-' + 
                       String(now.getDate()).padStart(2, '0');
         const thisMonth = today.substring(0, 7);
-        const thisYear = today.substring(0, 4);
+        const thisYear = now.getFullYear();
 
         console.log('[Traffic] updateDateInput: period=' + period);
 
-        if (period === 'day') {
-            dateInput.type = 'date';
-            dateInput.value = this.currentDate || today;
-            console.log('[Traffic] Day input set to: ' + dateInput.value);
-        } else if (period === 'month') {
-            dateInput.type = 'month';
-            dateInput.value = this.currentDate || thisMonth;
-            console.log('[Traffic] Month input set to: ' + dateInput.value);
-        } else if (period === 'year') {
-            dateInput.type = 'number';
-            dateInput.min = '2020';
-            dateInput.max = '2030';
-            dateInput.value = this.currentDate || thisYear;
-            console.log('[Traffic] Year input set to: ' + dateInput.value);
+        if (period === 'year') {
+            // 年视图：使用下拉框
+            dateInput.style.display = 'none';
+            if (dateSelect) {
+                dateSelect.style.display = '';
+                dateSelect.value = this.currentDate || String(thisYear);
+                console.log('[Traffic] Year select set to: ' + dateSelect.value);
+            }
+        } else {
+            // 日视图/月视图：使用输入框
+            if (dateSelect) dateSelect.style.display = 'none';
+            dateInput.style.display = '';
+            
+            if (period === 'day') {
+                dateInput.type = 'date';
+                dateInput.value = this.currentDate || today;
+                dateInput.max = today;  // 限制最大日期为今天
+                console.log('[Traffic] Day input set to: ' + dateInput.value);
+            } else if (period === 'month') {
+                dateInput.type = 'month';
+                dateInput.value = this.currentDate || thisMonth;
+                dateInput.max = thisMonth;  // 限制最大月份为当前月
+                console.log('[Traffic] Month input set to: ' + dateInput.value);
+            }
         }
     },
 
@@ -607,12 +618,18 @@ return view.extend({
                       String(now.getDate()).padStart(2, '0');
         const thisMonth = today.substring(0, 7);
         const thisYear = today.substring(0, 4);
-            
+        
         // 初始化 currentDate 为今天（日视图）
         this.currentDate = today;
 
         // 手机端优化：动态图表高度
         const chartHeight = isMobile ? 280 : 400;
+
+        // 生成最近5年的年份选项（从当前年到前4年）
+        const yearOptions = [];
+        for (let y = thisYear; y >= thisYear - 4; y--) {
+            yearOptions.push(E('option', { 'value': String(y) }, String(y) + '年'));
+        }
 
         // 手机端优化：控件垂直布局 + 自适应间距
         const controlStyle = isMobile
@@ -635,7 +652,6 @@ return view.extend({
                         let newPeriod = e.target.value;
                         console.log('[Traffic] Period changed to: ' + newPeriod);
                         
-                        // 更新日期 - 使用本地时区
                         const now = new Date();
                         const today = now.getFullYear() + '-' + 
                                       String(now.getMonth() + 1).padStart(2, '0') + '-' + 
@@ -643,9 +659,27 @@ return view.extend({
                         const thisMonth = today.substring(0, 7);
                         const thisYear = today.substring(0, 4);
                         
-                        if (newPeriod === 'year') _this.setCurrentDate(thisYear);
-                        else if (newPeriod === 'month') _this.setCurrentDate(thisMonth);
-                        else _this.setCurrentDate(today);
+                        // 检查当前日期格式是否匹配新视图
+                        let needUpdate = false;
+                        if (newPeriod === 'year') {
+                            // 年视图期望格式："2026"
+                            if (!_this.currentDate || !_this.currentDate.match(/^\d{4}$/)) {
+                                _this.setCurrentDate(thisYear);
+                                needUpdate = true;
+                            }
+                        } else if (newPeriod === 'month') {
+                            // 月视图期望格式："2026-04"
+                            if (!_this.currentDate || !_this.currentDate.match(/^\d{4}-\d{2}$/)) {
+                                _this.setCurrentDate(thisMonth);
+                                needUpdate = true;
+                            }
+                        } else {
+                            // 日视图期望格式："2026-04-19"
+                            if (!_this.currentDate || !_this.currentDate.match(/^\d{4}-\d{2}-\d{2}$/)) {
+                                _this.setCurrentDate(today);
+                                needUpdate = true;
+                            }
+                        }
                         
                         _this.updateDateInput(newPeriod);
                         _this.loadTrafficData();
@@ -665,6 +699,7 @@ return view.extend({
                     'class': 'cbi-input-text',
                     'style': isMobile ? 'min-height: 44px; padding: 8px; flex: 1;' : '',
                     'value': today,  // 使用今天的日期
+                    'max': today,  // 限制最大日期为今天
                     'autocomplete': 'off',  // 禁用浏览器自动填充
                     'change': () => {
                         console.log('[Traffic] Date input changed');
@@ -675,6 +710,18 @@ return view.extend({
                         }
                     }
                 }),
+                E('select', {
+                    'id': 'date-select',
+                    'class': 'cbi-input-select',
+                    'style': isMobile ? 'min-height: 44px; padding: 8px; flex: 1; display: none;' : 'display: none;',
+                    'change': (e) => {
+                        console.log('[Traffic] Year select changed');
+                        if (e.target.value) {
+                            _this.setCurrentDate(e.target.value);
+                            _this.loadTrafficData();
+                        }
+                    }
+                }, yearOptions),
                 E('button', {
                     'class': 'cbi-button cbi-button-action',
                     'style': isMobile ? 'min-height: 44px; min-width: 44px; padding: 8px 16px;' : '',
