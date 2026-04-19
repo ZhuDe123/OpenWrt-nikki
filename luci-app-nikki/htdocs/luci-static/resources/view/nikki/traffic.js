@@ -124,19 +124,11 @@ return view.extend({
         } else if (period === 'month') {
             date = thisMonth;
         } else {
-            date = today;  // 日视图始终使用今天
+            date = this.currentDate || today;  // 日视图使用用户选择的日期
         }
         
         this.currentDate = date;
         
-        // 立即同步更新输入框的值（在浏览器恢复缓存之前）
-        setTimeout(() => {
-            let dateInput = document.getElementById('date-input');
-            if (dateInput && period === 'day') {
-                dateInput.value = today;
-            }
-        }, 0);
-
         console.log('[Traffic] Request params: period=' + period + ', date=' + date);
 
         // 构建 URL 参数
@@ -200,6 +192,17 @@ return view.extend({
         }
 
         let labels, upData, downData, chartType;
+
+        // 兼容后端返回对象格式，转换为数组
+        if (data.minute && !Array.isArray(data.minute)) {
+            data.minute = Object.values(data.minute);
+        }
+        if (data.daily && !Array.isArray(data.daily)) {
+            data.daily = Object.values(data.daily);
+        }
+        if (data.monthly && !Array.isArray(data.monthly)) {
+            data.monthly = Object.values(data.monthly);
+        }
 
         // 处理 API 返回的数据
         if (period === 'year') {

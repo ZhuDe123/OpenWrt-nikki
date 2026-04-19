@@ -400,7 +400,11 @@ function query_stats(period, date_val) {
         let glo = '[]';
         let ip = '[]';
         if (stat(DB_PATH)) {
-            let mi = popen(sprintf("sqlite3 -json %s 'SELECT time, upload, download FROM traffic_minute WHERE date=\"%s\" AND time<=\"%s\" ORDER BY time;'", shell_quote(db), date_val, now_time));
+            // 判断是否是今天：今天只查询到当前时间，历史日期查询全天
+            let today_str = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday);
+            let time_filter = (date_val == today_str) ? sprintf('AND time<="%s"', now_time) : '';
+            
+            let mi = popen(sprintf("sqlite3 -json %s 'SELECT time, upload, download FROM traffic_minute WHERE date=\"%s\" %s ORDER BY time;'", shell_quote(db), date_val, time_filter));
             if (mi) {
                 let result = mi.read('all');
                 mi.close();
