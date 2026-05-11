@@ -71,14 +71,15 @@ function init_db() {
     // 开启 WAL 模式（提高并发写入性能）
     popen(sprintf("sqlite3 %s 'PRAGMA journal_mode=WAL;'", shell_quote(DB_PATH)))?.close();
 
+    // 所有整型字段改为 BIGINT（64位），避免int32溢出截断
     // 创建核心数据表
-    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_daily (date TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
-    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_monthly (month TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
-    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_yearly (year TEXT PRIMARY KEY, upload INTEGER, download INTEGER, updated_at INTEGER);'", shell_quote(DB_PATH)))?.close();
-    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_ip_daily (date TEXT, ip TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, ip));'", shell_quote(DB_PATH)))?.close();
-    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_minute (date TEXT, time TEXT, upload INTEGER, download INTEGER, PRIMARY KEY(date, time));'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_daily (date TEXT PRIMARY KEY, upload BIGINT, download BIGINT, updated_at BIGINT);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_monthly (month TEXT PRIMARY KEY, upload BIGINT, download BIGINT, updated_at BIGINT);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_yearly (year TEXT PRIMARY KEY, upload BIGINT, download BIGINT, updated_at BIGINT);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_ip_daily (date TEXT, ip TEXT, upload BIGINT, download BIGINT, PRIMARY KEY(date, ip));'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_minute (date TEXT, time TEXT, upload BIGINT, download BIGINT, PRIMARY KEY(date, time));'", shell_quote(DB_PATH)))?.close();
     // last_seen 字段：记录最后一次出现的时间，用于 10 分钟过期清理
-    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_last_capture (key TEXT PRIMARY KEY, upload INTEGER, download INTEGER, last_seen INTEGER);'", shell_quote(DB_PATH)))?.close();
+    popen(sprintf("sqlite3 %s 'CREATE TABLE IF NOT EXISTS traffic_last_capture (key TEXT PRIMARY KEY, upload BIGINT, download BIGINT, last_seen BIGINT);'", shell_quote(DB_PATH)))?.close();
 
     // 创建索引（加速查询）
     popen(sprintf("sqlite3 %s 'CREATE INDEX IF NOT EXISTS idx_ip_date ON traffic_ip_daily(date);'", shell_quote(DB_PATH)))?.close();
@@ -98,6 +99,7 @@ function init_db() {
 
 // 流量采集主函数：从 Mihomo API 获取数据并写入数据库
 function collect_traffic() {
+    // 1. 初始化数据库结构
     init_db();
     // 注意：数据库在 /tmp 内存盘，重启后自动重建，无需表迁移逻辑
     // 全新安装或重装时，init_db() 会直接创建包含 last_seen 字段的完整表结构
@@ -107,9 +109,10 @@ function collect_traffic() {
     if (stat(lock_file)) {
         let lock_p = open(lock_file, 'r');
         if (lock_p) {
+            // 尝试读取现有锁文件中的 PID
             let lock_pid = trim(lock_p.read('all') || '');
             lock_p.close();
-            // 检查锁对应的进程是否还在运行
+            // 检查锁对应的进程是否还在运行 (防止僵尸锁)
             if (lock_pid && stat('/proc/' + lock_pid)) {
                 log("Warning: Another collection is running, skipping");
                 return;
@@ -125,18 +128,28 @@ function collect_traffic() {
     if (my_pid) my_pid.close();
 
     let lock = open(lock_file, 'w');
-    if (lock) { lock.write(pid_str); lock.close(); }
-
+    if (lock) {
+        lock.write(pid_str);
+        lock.close();
+    }
     // 释放锁函数
-    function release_lock() { system("rm -f " + lock_file); }
+    function release_lock() {
+        system("rm -f " + lock_file);
+    }
 
     try {
-        // Step 1: 从新接口获取数据（包含全局总和 + IP 累计值，新接口已保证 ipStats 总和 <= upTotal）
+        // Step 1: 从 Mihomo API 获取实时流量数据
+        // 发送 GET 请求到 /traffic/ip/accumulated 接口
         let p1 = popen(get_api_url("/traffic/ip/accumulated"));
+        // 读取 API 响应的全部内容
         let summary_res = p1 ? p1.read('all') : '{}';
         if (p1) p1.close();
 
-        // 验证 JSON 格式和必要字段
+        // 解析 JSON 响应，提取必要的字段
+        // ==============================================
+        // 关键注释：使用 json() 解析大整数字段时，仅解析环节不会丢失精度
+        // 如果运算过程中触发浮点数转换，会导致精度丢失；写入SQLite未强转int会触发32位截断
+        // ==============================================
         let summary_data = summary_res && match(summary_res, /^\s*\{/) ? json(summary_res) : {};
         if (!summary_data || !summary_data.upTotal) {
             log("Error: Failed to get traffic data from /traffic/ip/accumulated");
@@ -144,136 +157,136 @@ function collect_traffic() {
             return;
         }
 
-        // 提取全局累计值（直接使用接口返回的 upTotal/downTotal，新接口已保证准确性）
-        let up_total = summary_data.upTotal || 0;
-        let down_total = summary_data.downTotal || 0;
+        // 从 API 响应中提取全局上传和下载总量，强制转换为int(ucode原生64位)
+        let api_up_total = int(summary_data.upTotal || 0);
+        let api_down_total = int(summary_data.downTotal || 0);
 
         // 计算当前时间信息（用于数据库记录）
         let now = time();
         let t = localtime(now);
-        let today_str = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday);
-        let month_str = sprintf('%d-%02d', t.year, t.mon);
-        let time_str = sprintf('%02d:%02d', t.hour, t.min);
-        let year_str = sprintf('%d', t.year);
+        let today_str = sprintf('%d-%02d-%02d', t.year, t.mon, t.mday); // 格式: YYYY-MM-DD
+        let month_str = sprintf('%d-%02d', t.year, t.mon);             // 格式: YYYY-MM
+        let time_str = sprintf('%02d:%02d', t.hour, t.min);           // 格式: HH:MM
+        let year_str = sprintf('%d', t.year);                         // 格式: YYYY
 
-        // Step 2: 收集当前所有活跃 IP 及其原始累计值（新接口已去重，直接使用）
-        let ip_list = [];
-        let ip_values = {};
+        // Step 2: 收集当前所有活跃 IP 及其原始累计值
+        let ip_list = [];          // 存储所有有效 IP 的列表
+        let ip_api_values = {};    // 存储 API 返回的每个 IP 的原始累计值 { ip: { up: X, down: Y } }
         if (summary_data.ipStats) {
             for (let i = 0; i < length(summary_data.ipStats); i++) {
                 let ip_stat = summary_data.ipStats[i];
                 let ip = ip_stat.ip;
                 // 过滤无效 IP
                 if (ip && ip != 'unknown' && ip != 'invalid IP') {
-                    ip_values[ip] = { up: ip_stat.upload || 0, down: ip_stat.download || 0 };
+                    // 将 API 返回的 IP 累计值强制转换为int(64位)
+                    ip_api_values[ip] = { up: int(ip_stat.upload || 0), down: int(ip_stat.download || 0) };
                     push(ip_list, ip);
                 }
             }
         }
 
-        // Step 3: 构建 SQL（所有增量计算在 SQLite 内部完成，避免 ucode 32 位整数溢出）
-        // 核心公式：
-        //   - 首次采集（旧快照不存在）：增量 = 0
-        //   - 正常采集（当前值 >= 旧值）：增量 = 当前值 - 旧值
-        //   - 服务重启（当前值 < 旧值）：增量 = 当前值
-        // 执行顺序：先计算增量（读取旧快照）→ 最后才更新快照
-        let sql = "BEGIN;\n";
+        // Step 3: 【核心修复】在 ucode 脚本层一次性读取所有旧快照，并转换为 int
+        // 构建 SQL 查询，一次性获取 traffic_last_capture 表中所有 key 的 upload 和 download 值
+        let snapshot_query = "SELECT key, upload, download FROM traffic_last_capture;";
+        let snapshot_cmd = sprintf("sqlite3 -separator '|' %s '%s'", shell_quote(DB_PATH), snapshot_query);
+        let snapshot_p = popen(snapshot_cmd);
+        let old_snapshots = {}; // 用于存储读取到的旧快照 { key: { up: X_int, down: Y_int } }
 
-        // 3.1 全局流量：累加今日/本月/本年的增量（此时读取的是 traffic_last_capture 中的旧快照）
-        // INSERT：首次采集用 API 值初始化；后续采集用 0
-        // ON CONFLICT：计算增量（仅当快照存在时触发）
-        // 日级统计
-        sql += sprintf("INSERT INTO traffic_daily VALUES ('%s', ", today_str);
-        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
-        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", down_total);
-        sql += sprintf("%d) ", now);
-        sql += "ON CONFLICT(date) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
-        sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
-        sql += sprintf("ELSE %d END), ", down_total);
-        sql += sprintf("updated_at = %d;\n", now);
-
-        // 月级统计
-        sql += sprintf("INSERT INTO traffic_monthly VALUES ('%s', ", month_str);
-        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
-        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", down_total);
-        sql += sprintf("%d) ", now);
-        sql += "ON CONFLICT(month) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
-        sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
-        sql += sprintf("ELSE %d END), ", down_total);
-        sql += sprintf("updated_at = %d;\n", now);
-
-        // 年级统计
-        sql += sprintf("INSERT INTO traffic_yearly VALUES ('%s', ", year_str);
-        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
-        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", down_total);
-        sql += sprintf("%d) ", now);
-        sql += "ON CONFLICT(year) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
-        sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
-        sql += sprintf("ELSE %d END), ", down_total);
-        sql += sprintf("updated_at = %d;\n", now);
-
-        // 分钟级统计
-        sql += sprintf("INSERT INTO traffic_minute VALUES ('%s', '%s', ", today_str, time_str);
-        sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END, ", up_total);
-        sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='last') IS NULL THEN %d ELSE 0 END) ", down_total);
-        sql += "ON CONFLICT(date, time) DO UPDATE SET ";
-        sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='last') ", up_total, up_total);
-        sql += sprintf("ELSE %d END), ", up_total);
-        sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='last') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='last') ", down_total, down_total);
-        sql += sprintf("ELSE %d END);\n", down_total);
-
-        // 3.2 IP 流量：为每个活跃 IP 累加增量（逻辑同全局流量，新接口已保证数据准确性）
-        for (let i = 0; i < length(ip_list); i++) {
-            let ip = ip_list[i];
-            let s = ip_values[ip];
-
-            // INSERT：首次用 API 值初始化；后续用 0
-            // ON CONFLICT：计算增量
-            sql += sprintf("INSERT INTO traffic_ip_daily VALUES ('%s', '%s', ", today_str, ip);
-            sql += sprintf("CASE WHEN (SELECT upload FROM traffic_last_capture WHERE key='ip:%s') IS NULL THEN %d ELSE 0 END, ", ip, s.up);
-            sql += sprintf("CASE WHEN (SELECT download FROM traffic_last_capture WHERE key='ip:%s') IS NULL THEN %d ELSE 0 END) ", ip, s.down);
-            sql += "ON CONFLICT(date, ip) DO UPDATE SET ";
-            sql += sprintf("upload = upload + (CASE WHEN %d >= (SELECT upload FROM traffic_last_capture WHERE key='ip:%s') THEN %d - (SELECT upload FROM traffic_last_capture WHERE key='ip:%s') ", s.up, ip, s.up, ip);
-            sql += sprintf("ELSE %d END), ", s.up);
-            sql += sprintf("download = download + (CASE WHEN %d >= (SELECT download FROM traffic_last_capture WHERE key='ip:%s') THEN %d - (SELECT download FROM traffic_last_capture WHERE key='ip:%s') ", s.down, ip, s.down, ip);
-            sql += sprintf("ELSE %d END);\n", s.down);
+        if (snapshot_p) {
+            let line;
+            // 循环读取每一行结果
+            while ((line = snapshot_p.read('line')) != null) {
+                // 假设 separator '|' 将 key, upload, download 分隔开
+                let parts = split(trim(line), '|');
+                if (length(parts) >= 3) { // 确保行格式正确
+                    let key = parts[0]; // 快照的键 (如 'last', 'ip:xxx.xxx.xxx.xxx')
+                    // 将从数据库读取的字符串值转换为 int 类型(ucode原生64位)
+                    let up_int = int(parts[1]) || 0;
+                    let down_int = int(parts[2]) || 0;
+                    // 将读取到的 int 类型快照存入对象
+                    old_snapshots[key] = { up: up_int, down: down_int };
+                }
+            }
+            snapshot_p.close(); // 关闭 popen 连接
         }
 
-        // 3.3 更新快照：所有增量计算完成后，才更新 traffic_last_capture（存储当前 API 值）
-        // 更新全局快照
-        sql += sprintf("INSERT INTO traffic_last_capture VALUES ('last', %d, %d, %d) ", up_total, down_total, now);
-        sql += "ON CONFLICT(key) DO UPDATE SET upload=excluded.upload, download=excluded.download, last_seen=excluded.last_seen;\n";
+        // Step 4: 【核心修复】在 ucode 脚本层计算所有增量 (Delta)，使用原生int64运算
+        // 获取全局旧快照值 (如果不存在，则视为 0)
+        let old_global_up = (old_snapshots['last'] && old_snapshots['last'].up !== undefined) ? old_snapshots['last'].up : 0;
+        let old_global_down = (old_snapshots['last'] && old_snapshots['last'].down !== undefined) ? old_snapshots['last'].down : 0;
 
-        // 更新各 IP 快照（只更新当前出现的 IP）
+        // 计算全局上传和下载增量，原生整数运算
+        let up_delta = (api_up_total >= old_global_up) ? (api_up_total - old_global_up) : api_up_total;
+        let down_delta = (api_down_total >= old_global_down) ? (api_down_total - old_global_down) : api_down_total;
+
+        // 存储每个 IP 的增量 (使用 int)
+        let ip_deltas = {};
         for (let i = 0; i < length(ip_list); i++) {
             let ip = ip_list[i];
-            let s = ip_values[ip];
-            sql += sprintf("INSERT INTO traffic_last_capture VALUES ('ip:%s', %d, %d, %d) ", ip, s.up, s.down, now);
-            sql += "ON CONFLICT(key) DO UPDATE SET upload=excluded.upload, download=excluded.download, last_seen=excluded.last_seen;\n";
+            let current_up = ip_api_values[ip].up;
+            let current_down = ip_api_values[ip].down;
+            // 获取该 IP 的旧快照值 (如果不存在，则视为 0)
+            let old_ip_up = (old_snapshots["ip:" + ip] && old_snapshots["ip:" + ip].up !== undefined) ? old_snapshots["ip:" + ip].up : 0;
+            let old_ip_down = (old_snapshots["ip:" + ip] && old_snapshots["ip:" + ip].down !== undefined) ? old_snapshots["ip:" + ip].down : 0;
+
+            // 计算该 IP 的上传和下载增量，原生整数运算
+            let ip_up_delta = (current_up >= old_ip_up) ? (current_up - old_ip_up) : current_up;
+            let ip_down_delta = (current_down >= old_ip_down) ? (current_down - old_ip_down) : current_down;
+
+            // 将计算好的 IP 增量存入对象
+            ip_deltas[ip] = { up: ip_up_delta, down: ip_down_delta };
         }
 
-        // 3.4 清理过期 IP 快照：删除 10 分钟未出现的 IP（节省内存）
+        // Step 5: 【核心修复】构建聚合的 SQL 字符串
+        // 所有计算好的增量均为原生int64，无类型转换，无溢出风险
+        let sql = "BEGIN;\n"; // 开始一个数据库事务
+
+        // 5.1 更新全局统计表
+        sql += sprintf("INSERT INTO traffic_daily (date, upload, download, updated_at) VALUES ('%s', %d, %d, %d) ON CONFLICT(date) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
+            today_str, up_delta, down_delta, now, up_delta, down_delta, now);
+        sql += sprintf("INSERT INTO traffic_monthly (month, upload, download, updated_at) VALUES ('%s', %d, %d, %d) ON CONFLICT(month) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
+            month_str, up_delta, down_delta, now, up_delta, down_delta, now);
+        sql += sprintf("INSERT INTO traffic_yearly (year, upload, download, updated_at) VALUES ('%s', %d, %d, %d) ON CONFLICT(year) DO UPDATE SET upload=upload+%d, download=download+%d, updated_at=%d;\n",
+            year_str, up_delta, down_delta, now, up_delta, down_delta, now);
+        sql += sprintf("INSERT INTO traffic_minute (date, time, upload, download) VALUES ('%s', '%s', %d, %d) ON CONFLICT(date, time) DO UPDATE SET upload=upload+%d, download=download+%d;\n",
+            today_str, time_str, up_delta, down_delta, up_delta, down_delta);
+
+        // 5.2 更新 IP 统计表
+        for (let i = 0; i < length(ip_list); i++) {
+            let ip = ip_list[i];
+            let ip_delta = ip_deltas[ip];
+            let safe_ip = shell_quote(ip);
+            sql += sprintf("INSERT INTO traffic_ip_daily (date, ip, upload, download) VALUES ('%s', %s, %d, %d) ON CONFLICT(date, ip) DO UPDATE SET upload=upload+%d, download=download+%d;\n",
+                today_str, safe_ip, ip_delta.up, ip_delta.down, ip_delta.up, ip_delta.down);
+        }
+
+        // 5.3 更新快照表
+        sql += sprintf("INSERT OR REPLACE INTO traffic_last_capture (key, upload, download, last_seen) VALUES ('last', %d, %d, %d);\n",
+            api_up_total, api_down_total, now);
+        // 更新每个活跃 IP 的快照
+        for (let i = 0; i < length(ip_list); i++) {
+            let ip = ip_list[i];
+            let safe_key = shell_quote("ip:" + ip);
+            sql += sprintf("INSERT OR REPLACE INTO traffic_last_capture (key, upload, download, last_seen) VALUES (%s, %d, %d, %d);\n",
+                safe_key, ip_api_values[ip].up, ip_api_values[ip].down, now);
+        }
+
+        // 5.4 清理过期的 IP 快照 (超过 10 分钟未见的 IP)
         sql += sprintf("DELETE FROM traffic_last_capture WHERE key LIKE 'ip:%%' AND (last_seen < %d OR last_seen IS NULL);\n", now - 600);
 
-        sql += "COMMIT;\n";
-        
-        // 执行 SQL：使用 printf 管道传输，避免 shell_quote 破坏单引号
+        sql += "COMMIT;\n"; // 提交事务
+
+        // Step 6: 执行聚合的 SQL 字符串
         let cmd = sprintf("printf '%%s' %s | sqlite3 %s", shell_quote(sql), shell_quote(DB_PATH));
         popen(cmd)?.close();
 
-        log(sprintf("Collect OK | up=%d down=%d ips=%d", up_total, down_total, length(ip_list)));
+        log(sprintf("Collect OK | Global Delta UP=%d DOWN=%d | IPs=%d", up_delta, down_delta, length(ip_list)));
 
     } catch (e) {
-        log("Error: " + e);
+        log("Error during collection: " + e);
     }
 
-    // 每日自动清理：删除 30 天前的旧数据（保留策略由 UCI 配置）
+    // 每日自动清理：删除 30 天前的旧数据
     let now_ts = time();
     let last_clean = int(uci.get('nikki', 'traffic', 'last_cleanup') || 0);
     if (now_ts - last_clean > 86400) {
