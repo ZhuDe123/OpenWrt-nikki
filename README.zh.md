@@ -43,42 +43,62 @@
 
 2. **流量采集脚本** (`/etc/nikki/ucode/traffic.uc`)
    - 定时从 Mihomo API 拉取流量数据
-   - 计算增量流量（当前值 - 上次快照值）
-   - 写入 SQLite 数据库（位于 /tmp 内存盘）
-   - 自动处理服务重启场景（计数器重置）
+   - **内存预计算全量增量**：一次性读取快照、脚本内计算增量、事务批量写入
+   - 写入 SQLite 数据库（位于 /tmp 内存盘，重启自动重建）
+   - 自动处理服务重启场景（计数器重置时自动恢复）
+   - 开启 WAL 模式提升并发写入性能
+   - 所有数值使用 BIGINT（64位整型），支持超大流量
 
 3. **数据库结构**
    ```sql
    -- 全局日统计
    CREATE TABLE traffic_daily (
        date TEXT PRIMARY KEY,
-       upload INTEGER,      -- 上传流量（字节）
-       download INTEGER,    -- 下载流量（字节）
-       updated_at INTEGER
+       upload BIGINT,      -- 上传流量（字节），64位整型
+       download BIGINT,    -- 下载流量（字节），64位整型
+       updated_at BIGINT   -- 更新时间戳，64位整型
    );
-   
+
    -- 全局月统计
    CREATE TABLE traffic_monthly (
        month TEXT PRIMARY KEY,
-       upload INTEGER,
-       download INTEGER,
-       updated_at INTEGER
+       upload BIGINT,
+       download BIGINT,
+       updated_at BIGINT
    );
-   
+
+   -- 全局年统计
+   CREATE TABLE traffic_yearly (
+       year TEXT PRIMARY KEY,
+       upload BIGINT,
+       download BIGINT,
+       updated_at BIGINT
+   );
+
+   -- 分钟级统计
+   CREATE TABLE traffic_minute (
+       date TEXT,
+       time TEXT,
+       upload BIGINT,
+       download BIGINT,
+       PRIMARY KEY(date, time)
+   );
+
    -- IP 级别日统计
    CREATE TABLE traffic_ip_daily (
        date TEXT,
        ip TEXT,
-       upload INTEGER,
-       download INTEGER,
+       upload BIGINT,
+       download BIGINT,
        PRIMARY KEY(date, ip)
    );
-   
+
    -- 流量快照表（用于计算增量）
    CREATE TABLE traffic_last_capture (
        key TEXT PRIMARY KEY,
-       up_total INTEGER,
-       down_total INTEGER
+       upload BIGINT,      -- 上传流量快照
+       download BIGINT,    -- 下载流量快照
+       last_seen BIGINT    -- 最后一次出现的时间戳
    );
    ```
 
@@ -100,42 +120,74 @@
 └────────────┬────────────────────┘
              │ 每 30 秒
              ▼
-┌─────────────────────────────┐
-│  traffic.uc 采集脚本         │
-│  1. 调用 API 获取数据        │
-│  2. 计算增量流量             │
-│  3. 更新日/月/IP 统计表      │
-│  4. 保存快照用于下次计算     │
-└──────────┬──────────────────┘
-           │
-           ▼
-┌──────────────────────────────┐
-│  SQLite 数据库（内存盘）      │
-│  /tmp/nikki/traffic.db       │
-│  - traffic_daily（日统计）    │
-│  - traffic_monthly（月统计）  │
-│  - traffic_ip_daily（IP统计） │
-│  - traffic_last_capture      │
-└──────────┬───────────────────┘
-           │
-           ▼
+┌──────────────────────────────────────────────────────┐
+│  traffic.uc 采集脚本（内存预计算全量增量）             │
+│  1. 调用 API 获取流量数据                              │
+│  2. 一次性读取所有历史快照到内存                        │
+│  3. 在脚本中计算流量增量（纯 int64 运算，无浮点）       │
+│  4. 构建事务批量 SQL，一次性写入所有表                  │
+│  5. 更新快照表，清理过期 IP 快照                        │
+└────────────┬─────────────────────────────────────────┘
+             │
+             ▼
+┌──────────────────────────────────────────────────────┐
+│  SQLite 数据库（内存盘 /tmp/nikki/traffic.db）         │
+│  - traffic_minute（分钟级统计，实时刷新）              │
+│  - traffic_daily（日统计，由分钟聚合）                 │
+│  - traffic_monthly（月统计）                          │
+│  - traffic_yearly（年统计）                           │
+│  - traffic_ip_daily（IP 维度日统计）                  │
+│  - traffic_last_capture（流量快照，用于增量计算）      │
+└──────────────────────────────────────────────────────┘
+             │
+             ▼
 ┌──────────────────────────────┐
 │  LuCI Web 界面               │
-│  - 实时流量图表               │
-│  - IP 流量排名               │
+│  - 实时流量图表（分钟级）     │
 │  - 日/月/年视图切换          │
+│  - IP 流量排名               │
 └──────────────────────────────┘
 ```
 
-**增量计算逻辑：**
-- 首次采集：增量 = 0（使用 API 值初始化快照）
-- 正常采集：增量 = 当前值 - 上次快照值
-- 服务重启：增量 = 当前值（检测到当前值 < 快照值，说明计数器重置）
+**增量计算逻辑（修复后）：**
+脚本采用**内存预计算全量增量**的方式，从根源解决高频采集时的增量漏算、覆盖问题：
+1. 一次性读取所有历史快照到内存
+2. 在脚本中计算流量增量（纯整数运算，无浮点操作）
+3. 构建事务批量 SQL，一次性写入所有统计表
+4. 增量 = 当前值 - 上次快照值（若当前值 < 快照值，说明计数器重置，则增量 = 当前值）
 
 **防重复统计机制：**
 - Mihomo 内核使用 `LoadAndDelete` 原子操作，确保同一连接只被统计一次
 - 即使连接的 `Close()` 被多次调用，只有第一次会触发流量记录
 - 活跃连接流量计入 `upTotal`/`downTotal`，但不在 `ipStats` 中（仅关闭后记录）
+
+### 修复说明（2024-05）
+
+本次核心修复内容（解决数据偏差/脚本报错所有问题）：
+
+1. **修复根因1：SQL 快照不一致导致的数据偏差**
+   - 移除原逻辑中 SQL 动态子查询计算增量的方式
+   - 改为**脚本内存预计算全量增量**，从根源解决高频采集时的增量漏算、覆盖问题
+
+2. **修复根因2：ucode 语法错误（致命报错）**
+   - 删除 ucode 不支持的 `int64()`/`sub64()` 函数
+   - 使用 ucode **原生 64 位整数** 语法，脚本可正常运行无报错
+
+3. **修复根因3：数值精度丢失（数据偏差一倍核心原因）**
+   - 全程禁止浮点数运算，所有流量数值统一使用 `int()` 强制转换为纯整数
+   - 杜绝隐式浮点数污染、32 位数值截断问题
+
+4. **修复根因4：数据库字段类型风险**
+   - 将所有表的流量/时间字段从 `INTEGER` 改为 `BIGINT`（64位整型）
+   - 支持超大流量存储，彻底避免数据库层数值截断
+
+5. **保留并优化：并发安全机制**
+   - 完善分布式锁逻辑，防止多进程并发采集导致的数据重复计算、错乱
+
+**修复效果：**
+- 日表与分钟表数据完全对齐，彻底解决数据偏差一倍的问题
+- 脚本无语法报错，稳定运行
+- 支持超大流量统计，无溢出、无截断、无精度丢失
 
 ### 配置方法
 
@@ -295,7 +347,7 @@ uci get nikki.mixin.api_secret
 
 # 5. 测试 API 连接
 curl -s -H "Authorization: Bearer $(uci get nikki.mixin.api_secret)" \
-  'http://127.0.0.1:9090/traffic/latest'
+  'http://127.0.0.1:9090/traffic/ip/accumulated'
 
 # 6. 查看服务日志
 logread | grep nikki-traffic

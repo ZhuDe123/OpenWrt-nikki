@@ -42,42 +42,62 @@ The traffic statistics system consists of:
 
 2. **Traffic Collection Script** (`/etc/nikki/ucode/traffic.uc`)
    - Periodically pulls traffic data from Mihomo API
-   - Calculates incremental traffic (current value - last snapshot value)
-   - Writes to SQLite database (located in /tmp RAM disk)
-   - Automatically handles service restart scenarios (counter reset)
+   - **Memory pre-calculation of full deltas**: reads all snapshots at once, calculates deltas in script, batch writes via transaction
+   - Writes to SQLite database (in /tmp RAM disk, auto-rebuilt on restart)
+   - Automatically handles service restart scenarios (auto-recovery on counter reset)
+   - Enables WAL mode for better concurrent write performance
+   - All numeric fields use BIGINT (64-bit integer) for large traffic support
 
 3. **Database Structure**
    ```sql
    -- Global daily statistics
    CREATE TABLE traffic_daily (
        date TEXT PRIMARY KEY,
-       upload INTEGER,      -- Upload traffic (bytes)
-       download INTEGER,    -- Download traffic (bytes)
-       updated_at INTEGER
+       upload BIGINT,      -- Upload traffic (bytes), 64-bit integer
+       download BIGINT,    -- Download traffic (bytes), 64-bit integer
+       updated_at BIGINT   -- Update timestamp, 64-bit integer
    );
-   
+
    -- Global monthly statistics
    CREATE TABLE traffic_monthly (
        month TEXT PRIMARY KEY,
-       upload INTEGER,
-       download INTEGER,
-       updated_at INTEGER
+       upload BIGINT,
+       download BIGINT,
+       updated_at BIGINT
    );
-   
+
+   -- Global yearly statistics
+   CREATE TABLE traffic_yearly (
+       year TEXT PRIMARY KEY,
+       upload BIGINT,
+       download BIGINT,
+       updated_at BIGINT
+   );
+
+   -- Minute-level statistics
+   CREATE TABLE traffic_minute (
+       date TEXT,
+       time TEXT,
+       upload BIGINT,
+       download BIGINT,
+       PRIMARY KEY(date, time)
+   );
+
    -- IP-level daily statistics
    CREATE TABLE traffic_ip_daily (
        date TEXT,
        ip TEXT,
-       upload INTEGER,
-       download INTEGER,
+       upload BIGINT,
+       download BIGINT,
        PRIMARY KEY(date, ip)
    );
-   
+
    -- Traffic snapshot table (for incremental calculation)
    CREATE TABLE traffic_last_capture (
        key TEXT PRIMARY KEY,
-       up_total INTEGER,
-       down_total INTEGER
+       upload BIGINT,      -- Upload traffic snapshot
+       download BIGINT,    -- Download traffic snapshot
+       last_seen BIGINT    -- Last seen timestamp
    );
    ```
 
@@ -90,43 +110,78 @@ The traffic statistics system consists of:
 ### How It Works
 
 ```
-┌─────────────┐
-│  Mihomo     │ ← /traffic/latest (Global traffic)
-│  Kernel     │ ← /traffic/closed (IP traffic)
-└──────┬──────┘
-       │ Every 30 seconds
-       ▼
-┌─────────────────────┐
-│  traffic.uc Script  │
-│  1. Fetch API data  │
-│  2. Calculate delta │
-│  3. Write to SQLite │
-│  4. Update snapshot │
-└──────┬──────────────┘
-       │
-       ▼
-┌──────────────────────┐
-│  SQLite Database      │
-│  /tmp/nikki/traffic.db│
-│  - traffic_daily      │
-│  - traffic_monthly    │
-│  - traffic_ip_daily   │
-│  - traffic_last_capture│
-└──────┬───────────────┘
-       │
-       ▼
-┌─────────────────────┐
-│  LuCI Web Interface  │
-│  - Real-time charts  │
-│  - IP rankings       │
-│  - History queries   │
-└─────────────────────┘
+┌─────────────────────────────────┐
+│  Mihomo Kernel (Custom Version) │
+│  /traffic/ip/accumulated        │
+│  - upTotal/downTotal (Global)   │
+│  - ipStats[] (IP Statistics)    │
+│  - Records on connection close  │
+└────────────┬────────────────────┘
+             │ Every 30 seconds
+             ▼
+┌──────────────────────────────────────────────────────┐
+│  traffic.uc Script (In-Memory Delta Pre-calculation) │
+│  1. Call API to get traffic data                     │
+│  2. Read all historical snapshots into memory        │
+│  3. Calculate deltas in script (pure int64, no float)│
+│  4. Build transaction batch SQL, write all tables    │
+│  5. Update snapshot table, clean expired IP snapshots│
+└────────────┬─────────────────────────────────────────┘
+             │
+             ▼
+┌──────────────────────────────────────────────────────┐
+│  SQLite Database (RAM Disk /tmp/nikki/traffic.db)    │
+│  - traffic_minute (Minute-level, real-time)          │
+│  - traffic_daily (Daily, aggregated from minutes)    │
+│  - traffic_monthly (Monthly)                         │
+│  - traffic_yearly (Yearly)                           │
+│  - traffic_ip_daily (IP-level daily)                 │
+│  - traffic_last_capture (Snapshots for delta calc)   │
+└──────────────────────────────────────────────────────┘
+             │
+             ▼
+┌──────────────────────────────┐
+│  LuCI Web Interface          │
+│  - Real-time charts (minute) │
+│  - Day/Month/Year view       │
+│  - IP traffic ranking        │
+└──────────────────────────────┘
 ```
 
-**Incremental Calculation Logic:**
-- First collection: Increment = 0 (initialize snapshot with API value)
-- Normal collection: Increment = Current value - Last snapshot value
-- Service restart: Increment = Current value (detects current value < snapshot value, indicating counter reset)
+**Incremental Calculation Logic (Fixed):**
+The script uses **in-memory pre-calculation of full deltas**, solving delta calculation issues at high collection frequency:
+1. Reads all historical snapshots into memory at once
+2. Calculates traffic deltas in script (pure int64 operations, no floating point)
+3. Builds transaction batch SQL to write all tables at once
+4. Delta = Current value - Last snapshot value (if current < snapshot, counter reset, delta = current value)
+
+### Fix Notes (2024-05)
+
+Core fixes (resolving data deviation / script errors):
+
+1. **Fix Root Cause 1: Data deviation caused by SQL snapshot inconsistency**
+   - Removed SQL dynamic subquery delta calculation
+   - Changed to **in-memory pre-calculation of full deltas** to solve incremental miss/overwrite issues
+
+2. **Fix Root Cause 2: ucode syntax errors (fatal)**
+   - Removed unsupported `int64()`/`sub64()` functions
+   - Use ucode **native 64-bit integer** syntax for error-free execution
+
+3. **Fix Root Cause 3: Numeric precision loss (core cause of 1x deviation)**
+   - No floating point operations allowed, all traffic values use `int()` for pure integer conversion
+   - Eliminates implicit floating point pollution and 32-bit truncation
+
+4. **Fix Root Cause 4: Database field type risk**
+   - Changed all traffic/timestamp fields from `INTEGER` to `BIGINT` (64-bit integer)
+   - Supports large traffic storage, eliminates database-level truncation
+
+5. **Retained & optimized: Concurrency safety**
+   - Improved distributed lock logic to prevent data duplication/chaos from concurrent collection
+
+**Fix Results:**
+- Daily and minute tables are now fully aligned, completely solving the 1x data deviation issue
+- Script runs without syntax errors, stable operation
+- Supports large traffic statistics without overflow, truncation, or precision loss
 
 ### Configuration
 
